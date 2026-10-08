@@ -1,0 +1,22 @@
+Offline speech engine: speak.js, a JavaScript port of eSpeak by Alon Zakai.
+Copyright the eSpeak contributors, Alon Zakai and the Mozilla Foundation.
+License: GNU General Public License version 3 (full upstream text in LICENSE).
+
+Pinned upstream revision:
+https://github.com/kripken/speak.js/tree/9c6f642f7d78bab51d16b2e8b79cdf205643ec35
+Source, dictionaries and build instructions:
+https://github.com/kripken/speak.js
+https://github.com/kripken/speak.js/blob/9c6f642f7d78bab51d16b2e8b79cdf205643ec35/src/emscripten.sh
+
+Local changes: browser-worker bindings for legacy runtime globals; complete
+unmodified Russian dictionary and voice from the same upstream revision added
+to the emulated filesystem; Unicode input converted to UTF-8 before synthesis.
+The upstream English dictionary, phoneme rules and samples are unmodified.
+No dictionary has been truncated and no speech asset is fetched at runtime.
+Regenerate with node scripts/prepare-speech.mjs. A verified local upstream
+checkout may be supplied as its first argument. Pinned source checksums are
+recorded in that script.
+
+The engine uses formant synthesis. Its audible offline fallback does not claim
+to sound like a human or a neural voice. Installed browser voices are preferred
+when available.

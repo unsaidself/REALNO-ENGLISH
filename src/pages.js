@@ -1,0 +1,87 @@
+import { createBackup, inspectBackup, restoreBackup, parseImport, stageImport, discardStaged, commitStaged } from './portability.js';
+import { rankProgress, rankCatalog } from './ranks.js';
+
+export function ranksPage(data, icon, esc) {
+  const rank = rankProgress(data);
+  return `<section class="rank-summary" data-rank-level="${rank.level}" data-rank="${rankCatalog[rank.level - 1].id}"><div class="rank-emblem" data-rank-level="${rank.level}">${icon('trophy')}<span>${rank.level}</span></div><div><span class="panel-label">Твой ранг</span><h2>${esc(rank.name)}</h2><p>Каждый правильный ответ — ещё один шаг вперёд.</p><div class="rank-xp"><strong id="rank-total-xp">${rank.xp} XP</strong><span>${rank.nextName ? `До ранга «${esc(rank.nextName)}» — ${rank.remaining} XP` : 'Ты достиг высшего ранга'}</span></div><div class="rank-track" role="progressbar" aria-label="До следующего ранга" aria-valuenow="${Math.round(rank.progress)}" aria-valuemin="0" aria-valuemax="100"><i style="width:${rank.progress}%"></i></div><p class="rank-progress-label">${rank.nextXP ? `${rank.earned} / ${rank.nextXP - rankCatalog[rank.level - 1].xp} XP в этом ранге` : 'Продолжай практику и накапливай опыт'}</p><button class="primary" id="ranks-practice">Учиться дальше ${icon('arrow')}</button></div></section><section class="rank-ladder" aria-label="Все ранги">${rankCatalog.map(item => `<article class="rank-card ${item.level === rank.level ? 'current' : item.level < rank.level ? 'unlocked' : 'locked'}" data-rank="${item.id}" data-rank-level="${item.level}"><div class="rank-emblem" data-rank-level="${item.level}">${icon(item.level <= rank.level ? 'trophy' : 'lock')}</div><span>Ранг ${item.level}</span><h3>${esc(item.name)}</h3><p>${item.xp} XP</p><b>${item.level === rank.level ? 'Твой ранг' : item.level < rank.level ? 'Открыт' : `Ещё ${Math.max(0, item.xp - rank.xp)} XP`}</b></article>`).join('')}</section><p class="rank-rules">+10 XP за правильный ответ. Одна карточка приносит опыт до трёх раз за день. Ошибки не отнимают опыт. Прежние правильные ответы тоже учтены.</p>`;
+}
+
+export function storagePage(icon) {
+  return `<div class="storage-view"><div class="storage-grid"><section class="storage-panel"><span class="panel-label">На твоём устройстве</span><h2>${icon('archive')} Резервная копия</h2><p>Один файл со всеми наборами, категориями, прогрессом, рангами, настройками, картинками и аудио.</p><button class="primary" id="backup-download">${icon('download')} Скачать копию</button><p class="transfer-status" id="backup-status" role="status"></p></section><section class="storage-panel"><span class="panel-label">Вернуть сохранённое</span><h2>${icon('rotate')} Восстановление</h2><p>Выбери файл копии zhekandus. Перед восстановлением увидишь его содержимое.</p><label class="file-picker">Выбрать резервную копию<input type="file" id="restore-file" accept=".json,application/json"></label><div id="restore-preview" class="transfer-preview"></div><p class="transfer-status" id="restore-status" role="status"></p></section></div><section class="storage-panel import-panel"><span class="panel-label">Перенести карточки</span><h2>${icon('import')} Импорт CSV и Anki</h2><p>CSV с термином и определением, текстовый экспорт Anki или архив .apkg с наборами и вложениями. Новые наборы добавятся к твоей коллекции.</p><label class="file-picker">Выбрать файл<input type="file" id="import-file" accept=".csv,.tsv,.txt,.apkg,.colpkg"></label><p class="import-format">CSV: «термин,определение» или «термин;определение». Необязательные столбцы: example, category, title.</p><div id="import-preview" class="import-preview"></div><p class="transfer-status" id="import-status" role="status"></p></section><p class="storage-note">Файлы обрабатываются на твоём устройстве. Копии и записи никуда не отправляются.</p></div>`;
+}
+
+const summaryMarkup = summary => `<div class="summary-chips"><span>${summary.sets} наборов</span><span>${summary.cards} карточек</span><span>${summary.attachments} вложений</span></div>`;
+function download(blob, name) {
+  const url = URL.createObjectURL(blob), link = document.createElement('a');
+  link.href = url; link.download = name; document.body.append(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5_000);
+}
+export function bindStorage({ getData, onRestore, onImport, onSuccess, notify, esc }) {
+  const view = document.querySelector('.storage-view');
+  let busy = false, snapshot = null, imported = null;
+  const setBusy = value => {
+    busy = value;
+    if (view.isConnected) view.querySelectorAll('input,button').forEach(control => { control.disabled = value; });
+  };
+  const errorText = error => error?.message || 'Не получилось обработать файл. Попробуй ещё раз.';
+  view.querySelector('#backup-download').onclick = async () => {
+    if (busy) return; setBusy(true);
+    const status = view.querySelector('#backup-status'); status.textContent = 'Собираю карточки и вложения…';
+    try {
+      const blob = await createBackup(structuredClone(getData()));
+      if (!view.isConnected) return;
+      const now = new Date();
+      const date = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+      download(blob, `zhekandus-backup-${date}.json`); status.textContent = 'Копия готова. Сохрани скачанный файл в надёжном месте.';
+    } catch (error) { if (view.isConnected) status.textContent = errorText(error); }
+    finally { setBusy(false); }
+  };
+  view.querySelector('#restore-file').onchange = async event => {
+    const file = event.target.files[0]; if (!file || busy) return;
+    setBusy(true); snapshot = null;
+    const status = view.querySelector('#restore-status'), preview = view.querySelector('#restore-preview');
+    preview.innerHTML = ''; status.textContent = 'Проверяю копию…';
+    try {
+      const result = await inspectBackup(file); if (!view.isConnected) return;
+      snapshot = result;
+      preview.innerHTML = `${summaryMarkup(result.summary)}<p>${result.summary.answers} ответов сохранено в прогрессе. Текущие наборы, прогресс и настройки будут заменены содержимым этой копии.</p><button class="primary" id="restore-confirm">Восстановить эту копию</button>`;
+      status.textContent = 'Файл проверен. Восстановление начнётся после нажатия кнопки.';
+      preview.querySelector('#restore-confirm').onclick = async () => {
+        if (busy || !snapshot) return; setBusy(true); status.textContent = 'Восстанавливаю вложения и прогресс…';
+        let restored;
+        try {
+          restored = await restoreBackup(snapshot);
+          if (!view.isConnected) { await discardStaged(restored); return; }
+          if (!onRestore(restored)) { await discardStaged(restored); throw new Error('Браузер запретил сохранение. Твои текущие данные сохранены.'); }
+          await commitStaged(restored); onSuccess(); notify('Резервная копия восстановлена');
+        } catch (error) { if (restored) await discardStaged(restored).catch(() => {}); if (view.isConnected) status.textContent = errorText(error); }
+        finally { setBusy(false); }
+      };
+    } catch (error) { if (view.isConnected) status.textContent = errorText(error); }
+    finally { setBusy(false); }
+  };
+  view.querySelector('#import-file').onchange = async event => {
+    const file = event.target.files[0]; if (!file || busy) return;
+    setBusy(true); imported = null;
+    const status = view.querySelector('#import-status'), preview = view.querySelector('#import-preview');
+    preview.innerHTML = ''; status.textContent = 'Читаю карточки…';
+    try {
+      const result = await parseImport(file); if (!view.isConnected) return;
+      imported = result;
+      preview.innerHTML = `${summaryMarkup(result.summary)}${result.sets.slice(0,5).map(set => `<div><h3>${esc(set.title)}</h3><p>${set.cards.length} карточек · ${esc(set.category)}</p><div class="terms">${set.cards.slice(0,3).map(card=>`<div><b>${esc(card[0])}</b><span>${esc(card[1])}</span></div>`).join('')}</div></div>`).join('')}${result.warnings?.length ? `<p>${result.warnings.map(esc).join('<br>')}</p>` : ''}<button class="primary" id="import-confirm">Добавить наборы в коллекцию</button>`;
+      status.textContent = 'Проверь карточки и нажми «Добавить».';
+      preview.querySelector('#import-confirm').onclick = async () => {
+        if (busy || !imported) return; setBusy(true); status.textContent = 'Сохраняю наборы и вложения…';
+        let sets;
+        try {
+          sets = await stageImport(imported);
+          if (!view.isConnected) { await discardStaged(sets); return; }
+          if (!onImport(sets)) { await discardStaged(sets); throw new Error('Браузер запретил сохранение. Твоя коллекция не изменена.'); }
+          await commitStaged(sets); onSuccess(); notify(`Импортировано наборов: ${sets.length}`);
+        } catch (error) { if (sets) await discardStaged(sets).catch(() => {}); if (view.isConnected) status.textContent = errorText(error); }
+        finally { setBusy(false); }
+      };
+    } catch (error) { if (view.isConnected) status.textContent = errorText(error); }
+    finally { setBusy(false); }
+  };
+}
