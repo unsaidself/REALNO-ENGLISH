@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCloze, buildListening, evaluateCloze, evaluateListening, normalizeExerciseAnswer } from '../src/exercises.js';
+import { buildCloze, buildListening, evaluateCloze, evaluateListening, normalizeExerciseAnswer, normalizeTypedAnswer, answerVariants, matchesTypedAnswer } from '../src/exercises.js';
 
 const card = (term, example) => [term, 'определение', { example }];
 
@@ -21,7 +21,7 @@ test('infinitive to is optional in real examples while longer exact phrases win'
   assert.equal(normal.answer, 'make a difference');
   assert.equal(normal.before, 'Small changes can ');
   assert.equal(evaluateCloze('make a difference', normal), true);
-  assert.equal(evaluateCloze('to make a difference', normal), false);
+  assert.equal(evaluateCloze('to make a difference', normal), true);
   const full = buildCloze(card(term, 'To make a difference, listen carefully.'));
   assert.equal(full.answer, 'To make a difference');
 });
@@ -71,4 +71,55 @@ test('listening matches spelling independent of punctuation and spacing', () => 
   assert.equal(buildListening(['', 'test']), null);
   assert.equal(evaluateListening('', null), false);
   assert.equal(normalizeExerciseAnswer('  “Don’t”    panic!  '), 'dont panic');
+});
+
+test('typed answers accept infinitives, grammatical annotations, and slash alternatives', () => {
+  assert.equal(normalizeTypedAnswer('  TO Remember (глагол) [B1] {note}!  '), 'remember');
+  assert.equal(normalizeTypedAnswer('to remember (verb (regular))'), 'remember');
+  assert.deepEqual(answerVariants('to remember (помнить) / recall / Recall'), ['remember', 'recall']);
+  assert.equal(matchesTypedAnswer('remember', 'to remember (глагол)'), true);
+  assert.equal(matchesTypedAnswer('run', 'run (быстро/медленно)'), true);
+  assert.deepEqual(answerVariants('run (быстро/медленно) / jog [Бег/трусца]'), ['run', 'jog']);
+  assert.equal(matchesTypedAnswer('TO RECALL', ['remember', 'recall']), true);
+  assert.equal(matchesTypedAnswer('помнить', 'запомнить / помнить'), true);
+  assert.equal(matchesTypedAnswer('запомнить', 'запомнить / помнить'), true);
+  assert.equal(matchesTypedAnswer('forget', 'remember / recall'), false);
+  assert.equal(matchesTypedAnswer('to', 'to'), true);
+  assert.equal(matchesTypedAnswer('', '(глагол) / '), false);
+});
+
+test('one spelling edit is accepted only when the expected answer has more than five characters', () => {
+  for (const input of ['remembr', 'rememberr', 'xemember', 'remembex']) assert.equal(matchesTypedAnswer(input, 'remember'), true, input);
+  for (const input of ['rember', 'xemembex', 'rememreb']) assert.equal(matchesTypedAnswer(input, 'remember'), false, input);
+  assert.equal(matchesTypedAnswer('cag', 'cat'), false);
+  assert.equal(matchesTypedAnswer('pint', 'point'), false);
+  assert.equal(matchesTypedAnswer('pints', 'points'), true);
+  assert.equal(matchesTypedAnswer('помнитьь', 'помнить'), true);
+  assert.equal(matchesTypedAnswer('помнть', 'помнить'), true);
+  assert.equal(matchesTypedAnswer('😀 remember', 'remember'), true);
+  assert.equal(matchesTypedAnswer('уже', 'Ужё'), true);
+  assert.equal(matchesTypedAnswer('  “Don’t” panic! ', "don't panic"), true);
+  assert.equal(matchesTypedAnswer('a'.repeat(20000) + 'b', 'a'.repeat(20000)), true);
+});
+
+test('sentence-gap aliases preserve the genuine occurrence and accept other saved alternatives', () => {
+  const exercise = buildCloze(card('To remember (глагол) / recall', 'Please recall this moment.'));
+  assert.equal(exercise.answer, 'recall');
+  assert.equal(exercise.prompt, 'Please ____ this moment.');
+  assert.equal(evaluateCloze('to remember', exercise), true);
+  assert.equal(evaluateCloze('recal', exercise), true);
+  assert.equal(evaluateCloze('forget', exercise), false);
+  const cpp = buildCloze(card('C++ (язык)', 'We write C++ today.'));
+  assert.equal(cpp.answer, 'C++');
+  assert.equal(cpp.prompt, 'We write ____ today.');
+});
+
+test('listening speaks the first clean alternative while all saved alternatives can be typed', () => {
+  const exercise = buildListening(card('To remember (глагол) / recall', ''));
+  assert.equal(exercise.prompt, 'To remember');
+  assert.equal(exercise.answer, 'To remember (глагол) / recall');
+  assert.equal(evaluateListening('remember', exercise), true);
+  assert.equal(evaluateListening('recall', exercise), true);
+  assert.equal(evaluateListening('forget', exercise), false);
+  assert.equal(buildListening(card('(note)', '')), null);
 });

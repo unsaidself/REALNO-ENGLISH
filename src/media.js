@@ -110,7 +110,7 @@ export function getSpeechVoices() {
   return [
     { id: 'offline-en', name: 'Встроенный английский · без интернета', lang: 'en-US', localService: true },
     { id: 'offline-ru', name: 'Встроенный русский · без интернета', lang: 'ru-RU', localService: true },
-    ...installedVoices().map(voice => ({ id: voice.voiceURI || voice.name, name: voice.name, lang: voice.lang, localService: !!voice.localService })),
+    ...installedVoices().filter(voice => voice.localService).map(voice => ({ id: voice.voiceURI || voice.name, name: voice.name, lang: voice.lang, localService: true })),
   ];
 }
 
@@ -200,7 +200,9 @@ export async function speakText(text, { lang, rate = 0.9, voice = 'auto', onStar
     const voices = await waitForVoices(synthesis, session.abort.signal);
     if (!active()) return;
     const prefix = language.split('-')[0].toLowerCase();
-    const available = voices.filter(item => String(item.lang).toLowerCase().split('-')[0] === prefix);
+    // Remote native voices may send card text to their provider. A stored remote
+    // voice ID must fall back to an installed voice or the bundled synthesizer.
+    const available = voices.filter(item => item.localService && String(item.lang).toLowerCase().split('-')[0] === prefix);
     const requested = available.find(item => (item.voiceURI || item.name) === voice);
     // Prefer genuinely installed voices: remote-only voices silently fail offline.
     const selected = requested
@@ -267,9 +269,10 @@ function openMediaDatabase() {
       reject(mediaStorageError(error));
     }
     try {
-      request = indexedDB.open(DATABASE_NAME, 1);
+      request = indexedDB.open(DATABASE_NAME, 2);
       request.onupgradeneeded = () => {
         if (!request.result.objectStoreNames.contains(STORE_NAME)) request.result.createObjectStore(STORE_NAME, { keyPath: 'id' });
+        if (!request.result.objectStoreNames.contains('state')) request.result.createObjectStore('state');
       };
       request.onerror = () => fail(request.error);
       request.onblocked = () => fail();

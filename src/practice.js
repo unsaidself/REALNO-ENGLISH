@@ -32,8 +32,8 @@ function reviewFor(data, id) {
   return value;
 }
 
-/** Preserve the existing collection and media metadata while upgrading older saves. */
-export function ensurePracticeData(data) {
+/** Cheap runtime normalization: answering must not copy an entire collection. */
+function ensureHistory(data) {
   if (!object(data)) throw new TypeError('Learning data must be an object.');
   if (!Array.isArray(data.sets)) data.sets = [];
   if (!Array.isArray(data.days)) data.days = [];
@@ -51,6 +51,13 @@ export function ensurePracticeData(data) {
   data.settings.sounds = sounds === undefined || sounds === null ? true : ![false, 0, '0', 'false', 'off'].includes(sounds);
   const goal = Number(data.settings.goal);
   data.settings.goal = Number.isFinite(goal) && goal > 0 ? Math.min(500, Math.max(1, Math.round(goal))) : 20;
+  return data;
+}
+
+/** Preserve the existing collection and media metadata while upgrading older saves. */
+export function ensurePracticeData(data) {
+  ensureHistory(data);
+  normalizeCardStats(data);
 
   // Reserve all identities before generating any new one. Removed-card reviews are
   // retained so restoring an existing card can restore its learning history.
@@ -90,13 +97,17 @@ export function localDay(date = new Date()) {
 
 /** Oldest overdue cards come first; unseen cards follow them in collection order. */
 export function getDueCards(data, setId = null, now = Date.now()) {
-  ensurePracticeData(data);
+  ensureHistory(data);
   const time = timestamp(now);
   const cards = [];
   for (const set of data.sets) {
-    if (!object(set) || (setId !== null && String(set.id) !== String(setId))) continue;
+    if (!object(set) || !Array.isArray(set.cards) || (setId !== null && String(set.id) !== String(setId))) continue;
     for (const card of set.cards) {
-      if (!Array.isArray(card) || !object(card[2])) continue;
+      if (!Array.isArray(card) || card.length < 2) continue;
+      if (!object(card[2]) || !identifier(card[2].id)) {
+        ensurePracticeData(data);
+        return getDueCards(data, setId, time);
+      }
       const review = reviewFor(data, card[2].id);
       if (!review || Number(review.due) <= time) cards.push({ set, card, due: review ? Number(review.due) : Infinity });
     }
@@ -104,32 +115,39 @@ export function getDueCards(data, setId = null, now = Date.now()) {
   return cards.sort((a, b) => a.due - b.due).map(({ set, card }) => ({ set, card }));
 }
 
-/** A failed answer resets the interval; correcting it restarts at one day. */
-export function scheduleReview(data, card, correct, now = Date.now()) {
-  ensurePracticeData(data);
+/** Explicit grades change the level; mistakes retain earlier learning progress. */
+export function scheduleReview(data, card, grading, now = Date.now()) {
+  ensureHistory(data);
+  const grade = grading === true ? 'good' : grading === false ? 'again' : grading;
+  if (!['again', 'hard', 'good', 'easy'].includes(grade)) throw new TypeError('Unknown review grade.');
   if (!Array.isArray(card) || card.length < 2) throw new TypeError('A review needs a term and definition.');
   if (!object(card[2]) || !identifier(card[2].id)) {
-    card[2] = { ...(object(card[2]) ? card[2] : {}), id: newId(new Set(Object.keys(data.reviews))) };
+    ensurePracticeData(data);
+    if (!object(card[2]) || !identifier(card[2].id)) {
+      card[2] = { ...(object(card[2]) ? card[2] : {}), id: newId(new Set(Object.keys(data.reviews))) };
+    }
   }
   const id = identifier(card[2].id);
   card[2].id = id;
   const time = timestamp(now);
   const previous = reviewFor(data, id);
   const previousLevel = previous ? Math.min(INTERVALS.length, count(previous.level)) : 0;
-  // Manual drills still count toward the daily goal, but successful repeat clicks
-  // must not advance an interval before its scheduled review, even on another day.
-  if (correct && previousLevel > 0 && Number(previous.due) > time) return previous;
+  // Automatic answers preserve the existing interval during early drills. An
+  // explicit self-assessment delivers its advertised level change immediately.
+  // A retry after a lapse may be corrected early even when its level is positive.
+  if (grading === true && previous && Number(previous.interval) >= 1 && Number(previous.due) > time) return previous;
 
-  const level = correct ? Math.min(INTERVALS.length, previousLevel + 1) : 0;
-  const interval = correct ? INTERVALS[level - 1] : RETRY / DAY;
-  const review = { due: time + (correct ? interval * DAY : RETRY), interval, level, lastReviewed: time };
+  const change = { again: -2, hard: 0, good: 1, easy: 2 }[grade];
+  const level = Math.min(INTERVALS.length, Math.max(0, previousLevel + change));
+  const interval = grade === 'again' ? RETRY / DAY : INTERVALS[Math.max(1, level) - 1];
+  const review = { due: time + (grade === 'again' ? RETRY : interval * DAY), interval, level, lastReviewed: time };
   Object.defineProperty(data.reviews, id, { value: review, enumerable: true, configurable: true, writable: true });
   return review;
 }
 
 /** Update daily activity only; callers own the existing cumulative answer totals. */
 export function recordDaily(data, correct, now = Date.now()) {
-  ensurePracticeData(data);
+  ensureHistory(data);
   const date = localDay(timestamp(now));
   const record = dailyRecord(own(data.daily, date) ? data.daily[date] : null);
   record.answers++;
@@ -139,8 +157,30 @@ export function recordDaily(data, correct, now = Date.now()) {
   return record;
 }
 
+/** Reclassify a guarded current mistake without adding a second attempt. */
+export function reclassifyAnswer(data, card, { reviewBefore = null, now = Date.now() } = {}) {
+  ensureHistory(data);
+  const id = identifier(card?.[2]?.id);
+  if (!Array.isArray(card) || !id) throw new TypeError('A correction needs a card identity.');
+  const time = timestamp(now), date = localDay(time);
+  const daily = dailyRecord(own(data.daily, date) ? data.daily[date] : null);
+  if (daily.answers <= daily.correct || data.answers <= data.learned) throw new RangeError('There is no incorrect answer to reclassify.');
+  if (reviewBefore !== null && !object(reviewBefore)) throw new TypeError('A correction needs its original review snapshot.');
+
+  if (reviewBefore === null) delete data.reviews[id];
+  else Object.defineProperty(data.reviews, id, { value: { ...reviewBefore }, enumerable: true, configurable: true, writable: true });
+  const review = scheduleReview(data, card, true, time);
+  data.learned++;
+  daily.correct++;
+  data.daily[date] = daily;
+  if (object(data.cardStats) && own(data.cardStats, id) && object(data.cardStats[id])) {
+    data.cardStats[id].errors = Math.max(0, count(data.cardStats[id].errors) - 1);
+  }
+  return review;
+}
+
 export function dailyProgress(data, now = Date.now()) {
-  ensurePracticeData(data);
+  ensureHistory(data);
   const date = localDay(timestamp(now));
   const record = dailyRecord(own(data.daily, date) ? data.daily[date] : null);
   const goal = data.settings.goal;
@@ -149,7 +189,7 @@ export function dailyProgress(data, now = Date.now()) {
 
 /** Zero-based months can overflow, e.g. month 12 means January of the next year. */
 export function activityCalendar(data, year, monthZeroBased) {
-  ensurePracticeData(data);
+  ensureHistory(data);
   if (!Number.isInteger(Number(year)) || !Number.isInteger(Number(monthZeroBased))) return [];
   const start = new Date(0);
   start.setHours(12, 0, 0, 0);
@@ -167,7 +207,7 @@ export function activityCalendar(data, year, monthZeroBased) {
 
 /** A current streak includes yesterday when today's session has not started yet. */
 export function studyStreak(data, now = Date.now()) {
-  ensurePracticeData(data);
+  ensureHistory(data);
   const active = new Set(data.days.filter(day => /^\d{4}-\d{2}-\d{2}$/.test(day)));
   for (const [date, record] of Object.entries(data.daily)) if (count(record?.answers) > 0) active.add(date);
   const date = new Date(timestamp(now));
@@ -179,4 +219,68 @@ export function studyStreak(data, now = Date.now()) {
     date.setDate(date.getDate() - 1);
   }
   return streak;
+}
+/** Normalize only recorded histories, once at load/import/editor boundaries. */
+function normalizeCardStats(data) {
+  if (data.cardStats === undefined) return;
+  if (!object(data.cardStats)) { data.cardStats = {}; return; }
+  for (const id of Object.keys(data.cardStats)) {
+    const previous = object(data.cardStats[id]) ? data.cardStats[id] : {};
+    const answers = Math.min(Number.MAX_SAFE_INTEGER, count(previous.answers));
+    const errors = Math.min(answers, count(previous.errors));
+    Object.defineProperty(data.cardStats, id, { value: { ...previous, answers, errors }, enumerable: true, configurable: true, writable: true });
+  }
+}
+/** Count actual attempts without inventing histories for older saved cards. */
+export function recordCardAnswer(data, card, correct) {
+  ensureHistory(data);
+  if (!Array.isArray(card) || card.length < 2) throw new TypeError('An answer needs a card.');
+  if (!object(card[2]) || !identifier(card[2].id)) {
+    ensurePracticeData(data);
+    if (!object(card[2]) || !identifier(card[2].id)) {
+      card[2] = { ...(object(card[2]) ? card[2] : {}), id: newId(new Set(Object.keys(data.reviews))) };
+    }
+  }
+  const id = identifier(card[2].id);
+  if (!object(data.cardStats)) data.cardStats = {};
+  const previous = own(data.cardStats, id) && object(data.cardStats[id]) ? data.cardStats[id] : {};
+  const previousAnswers = Math.min(Number.MAX_SAFE_INTEGER, count(previous.answers));
+  const answers = Math.min(Number.MAX_SAFE_INTEGER, previousAnswers + 1);
+  const errors = Math.min(answers, Math.min(previousAnswers, count(previous.errors)) + Number(correct !== true));
+  const stats = { ...previous, answers, errors };
+  Object.defineProperty(data.cardStats, id, { value: stats, enumerable: true, configurable: true, writable: true });
+  return stats;
+}
+
+/** Lowest observed accuracy first; unseen cards belong in regular practice. */
+export function getWeakCards(data, setId = null) {
+  ensureHistory(data);
+  if (!object(data.cardStats)) return [];
+  const entries = [];
+  for (const set of data.sets) {
+    if (!object(set) || !Array.isArray(set.cards) || (setId !== null && String(set.id) !== String(setId))) continue;
+    for (const card of set.cards) {
+      if (!Array.isArray(card) || !identifier(card[2]?.id)) continue;
+      const id = identifier(card[2].id);
+      if (!own(data.cardStats, id) || !object(data.cardStats[id])) continue;
+      const answers = count(data.cardStats[id].answers), errors = Math.min(answers, count(data.cardStats[id].errors));
+      if (answers <= 0) continue;
+      entries.push({ set, card, answers, errors, accuracy: (answers - errors) / answers });
+    }
+  }
+  return entries.sort((a, b) => a.accuracy - b.accuracy || b.errors - a.errors);
+}
+
+/** Count present cards with mastered intervals, separately from correct answers. */
+export function learnedCardCount(data) {
+  ensureHistory(data);
+  const seen = new Set();
+  for (const set of data.sets) {
+    if (!object(set) || !Array.isArray(set.cards)) continue;
+    for (const card of set.cards) {
+      const id = identifier(card?.[2]?.id);
+      if (id && count(reviewFor(data, id)?.level) >= 4) seen.add(id);
+    }
+  }
+  return seen.size;
 }

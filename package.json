@@ -1,1 +1,17 @@
-{"name":"zhekandus","version":"1.0.0","private":true,"type":"module","scripts":{"dev":"vite --host 0.0.0.0","build":"vite build","preview":"vite preview --host 0.0.0.0","standalone":"node scripts/standalone.mjs","test":"node --test"},"devDependencies":{"fake-indexeddb":"^6.2.5","vite":"^7.1.0"},"dependencies":{"fflate":"^0.8.3","fzstd":"^0.1.1","sql.js":"^1.14.2"}}
+{
+  "name": "zhekandus",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "standalone": "node scripts/standalone.mjs",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.5",
+    "vite": "^7.1.0"
+  }
+}

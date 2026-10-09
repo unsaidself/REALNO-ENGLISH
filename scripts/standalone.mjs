@@ -41,10 +41,14 @@ try {
   await import(source);
 } catch (error) {
   const app = document.getElementById('app');
-  const message = document.createElement('p');
-  message.style.cssText = 'padding:32px;font:20px/1.5 Arial,sans-serif';
-  message.textContent = 'Не удалось запустить zhekandus. Скачай HTML-файл и открой его в браузере. ' + (error?.message || '');
-  app.replaceChildren(message);
+  // The app can already have rendered an actionable storage error and retry
+  // button. Keep that panel when the module reports its startup failure.
+  if (!app.querySelector('.startup-error')) {
+    const message = document.createElement('p');
+    message.style.cssText = 'padding:32px;font:20px/1.5 Arial,sans-serif';
+    message.textContent = 'Не удалось запустить zhekandus. Скачай HTML-файл и открой его в браузере. ' + (error?.message || '');
+    app.replaceChildren(message);
+  }
 } finally {
   if (source) URL.revokeObjectURL(source);
 }

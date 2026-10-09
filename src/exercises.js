@@ -10,6 +10,55 @@ export function normalizeExerciseAnswer(value) {
     .replace(/[^\p{L}\p{M}\p{N}]+/gu, ' ').trim().replace(/\s+/g, ' ');
 }
 
+function withoutAnnotations(value) {
+  let text = String(value).normalize('NFKC'), previous;
+  // Process nested grammatical notes from the inside out, without discarding
+  // surrounding words or joining words on opposite sides of an annotation.
+  do {
+    previous = text;
+    text = text.replace(/\([^()]*\)|\[[^\[\]]*\]|\{[^{}]*\}/gu, ' ');
+  } while (text !== previous);
+  return text.trim().replace(/\s+/gu, ' ');
+}
+
+export function normalizeTypedAnswer(value) {
+  if (typeof value !== 'string' && typeof value !== 'number') return '';
+  return normalizeExerciseAnswer(withoutAnnotations(value)).replace(/^to\s+/u, '');
+}
+
+function rawAnswerVariants(value) {
+  return (Array.isArray(value) ? value : [value]).flatMap(item => {
+    if (typeof item !== 'string' && typeof item !== 'number') return [];
+    return withoutAnnotations(item).split('/').map(alias => alias.trim()).filter(Boolean);
+  });
+}
+
+/** Exact normalized alternatives are also useful for filtering test distractors. */
+export function answerVariants(value) {
+  return [...new Set(rawAnswerVariants(value).map(normalizeTypedAnswer).filter(Boolean))];
+}
+
+/** Bounded Levenshtein: one insertion, deletion or substitution, in linear time. */
+function withinOneEdit(first, second) {
+  const a = [...first], b = [...second];
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0, j = 0, edits = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { i++; j++; continue; }
+    if (++edits > 1) return false;
+    if (a.length >= b.length) i++;
+    if (a.length <= b.length) j++;
+  }
+  return edits + Number(i < a.length || j < b.length) <= 1;
+}
+
+/** Forgiving spelling belongs only to typed practice, never test choices. */
+export function matchesTypedAnswer(input, expected) {
+  const actual = normalizeTypedAnswer(input);
+  if (!actual) return false;
+  return answerVariants(expected).some(variant => actual === variant || [...variant].length > 5 && withinOneEdit(actual, variant));
+}
+
 function termPattern(term) {
   // A hyphenated word or phrase can be written with spaces in an example.
   // The matched substring remains exactly as written in the original sentence.
@@ -37,8 +86,8 @@ export function buildCloze(card) {
   const term = readable(card[0]);
   const sentence = readable(card[2]?.example);
   if (!term || !sentence) return null;
-  const variants = [term];
-  if (/^to\s+\S/iu.test(term)) variants.push(term.replace(/^to\s+/iu, ''));
+  const aliases = rawAnswerVariants(term);
+  const variants = aliases.flatMap(alias => /^to\s+\S/iu.test(alias) ? [alias, alias.replace(/^to\s+/iu, '')] : [alias]);
   let occurrence = null;
   for (const variant of variants) {
     occurrence = findTerm(sentence, variant);
@@ -50,19 +99,19 @@ export function buildCloze(card) {
   const after = sentence.slice(index + answer.length);
   // A sample containing just the target gives no sentence context.
   if (!normalizeExerciseAnswer(before + after)) return null;
-  return { sentence, before, after, answer, prompt: `${before}____${after}` };
+  return { sentence, before, after, answer, prompt: `${before}____${after}`, ...(aliases.length > 1 ? { alternatives: aliases } : {}) };
 }
 
 /** The written answer is deliberately separate from the UI's listening prompt. */
 export function buildListening(card) {
   if (!Array.isArray(card)) return null;
   const answer = readable(card[0]);
-  return answer ? { prompt: answer, answer } : null;
+  const prompt = rawAnswerVariants(answer)[0];
+  return prompt ? { prompt, answer } : null;
 }
 
 function evaluate(answer, exercise) {
-  const expected = normalizeExerciseAnswer(exercise?.answer);
-  return Boolean(expected) && normalizeExerciseAnswer(answer) === expected;
+  return Boolean(exercise) && matchesTypedAnswer(answer, [exercise.answer, ...(exercise.alternatives || [])]);
 }
 
 export function evaluateCloze(answer, exerciseOrCard) {
