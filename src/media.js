@@ -1,12 +1,18 @@
 /**
- * Offline media helpers. Pronunciation prefers system voices and falls back to
- * the bundled eSpeak synthesizer, which needs no network or installed voice.
+ * Local media storage and pronunciation. Native online voices are supported;
+ * optional cloud TTS and downloaded Piper models cache audio in IndexedDB.
+ * Bundled eSpeak is the final fallback and requires no network or installed voice.
  * Attachments live in IndexedDB, never in the application's localStorage JSON.
  * file:// and private browsing storage support depends on the browser. Errors
  * are actionable so a failed media save does not prevent text-card editing.
  */
 
 import { synthesizeSpeech } from './offline-speech.js';
+import { selectSpeechVoice, rankSpeechVoices, describeSpeechVoice, voiceQuality } from './speech-voices.js';
+import { cloudSpeechIdentity, synthesizeCloudSpeech, speechCacheKey } from './cloud-speech.js';
+import { getTTSKey } from './tts-storage.js';
+import { neuralModel, neuralModelInstalled } from './neural-assets.js';
+import { synthesizeNeuralSpeech } from './neural-speech.js';
 export { synthesizeSpeech } from './offline-speech.js';
 
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -106,12 +112,8 @@ function installedVoices() {
   catch { return []; }
 }
 
-export function getSpeechVoices() {
-  return [
-    { id: 'offline-en', name: 'Встроенный английский · без интернета', lang: 'en-US', localService: true },
-    { id: 'offline-ru', name: 'Встроенный русский · без интернета', lang: 'ru-RU', localService: true },
-    ...installedVoices().filter(voice => voice.localService).map(voice => ({ id: voice.voiceURI || voice.name, name: voice.name, lang: voice.lang, localService: true })),
-  ];
+export function getSpeechVoices(language = 'en-US') {
+  return rankSpeechVoices(installedVoices(),language).map(describeSpeechVoice);
 }
 
 function waitForVoices(synthesis, signal) {
@@ -127,7 +129,7 @@ function waitForVoices(synthesis, signal) {
       signal.removeEventListener('abort', finish);
       resolve(installedVoices());
     };
-    const timer = setTimeout(finish, 350);
+    const timer = setTimeout(finish, 1500);
     synthesis.addEventListener('voiceschanged', finish);
     signal.addEventListener('abort', finish, { once: true });
   });
@@ -138,103 +140,144 @@ function waitForVoices(synthesis, signal) {
  * failures and missing voices switch to real local WAV synthesis automatically.
  * A retired session can neither start audio nor finish its replacement's UI.
  */
-export async function speakText(text, { lang, rate = 0.9, voice = 'auto', onStart, onEnd, onError } = {}) {
+export async function cachedSpeechAudio(text, { identity, lang, rate, cacheEntries, signal, onCache, synthesize }) {
+  const key = await speechCacheKey(text,{identity,lang,rate});
+  if (signal?.aborted) throw new DOMException('Озвучка отменена.','AbortError');
+  const entry = cacheEntries?.[key], id = entry?.audioId || `tts-${key}`;
+  const record = await loadAttachment(id).catch(()=>undefined);
+  if (record?.blob?.size) {
+    const info = record.ttsInfo || entry || identity;
+    onCache?.(key,{...identity,...entry,audioId:id});
+    return {blob:record.blob,info:{...identity,...info,type:'local',sourceType:identity.type,cached:true}};
+  }
+  const result = await synthesize();
+  if (signal?.aborted) throw new DOMException('Озвучка отменена.','AbortError');
+  let cacheWarning = '';
+  try {
+    await transact('readwrite',store=>store.put({id:`tts-${key}`,type:'audio',name:`Озвучка: ${identity.name}`,blob:result.blob,size:result.blob.size,createdAt:Date.now(),ttsInfo:identity}));
+    onCache?.(key,{...identity,audioId:`tts-${key}`});
+  } catch { cacheWarning = 'Звук воспроизведён, но аудиокопия не сохранилась. Проверь свободное место в браузере.'; }
+  return {...result,info:{...result.info,cacheWarning}};
+}
+
+export async function speakText(text, { lang, rate = 0.9, voice = 'auto', systemVoice = 'auto', cloud = {}, neuralId, cacheEntries, onCache, onStart, onEnd, onError, onNotice } = {}) {
   const content = String(text ?? '').trim();
   if (!content) return { ok: false, message: 'Нет текста для озвучки.' };
   if (content.length > 5000) return { ok: false, message: 'Для озвучки выбери текст короче 5000 символов.' };
-  pauseAttachmentAudio();
-  stopSpeech();
+  pauseAttachmentAudio(); stopSpeech();
   const unlocking = unlockAudio();
   const language = lang || (/[а-яё]/i.test(content) ? 'ru-RU' : 'en-US');
-  const numericRate = Number(rate);
-  const speed = Number.isFinite(numericRate) ? Math.max(0.5, Math.min(1.5, numericRate)) : 0.9;
-  const session = { abort: new AbortController(), timer: null, utterance: null, source: null, finished: false, fallback: false };
+  const numericRate = Number(rate), speed = Number.isFinite(numericRate) ? Math.max(.5,Math.min(1.5,numericRate)) : .9;
+  const session = {abort:new AbortController(),timer:null,utterance:null,source:null,finished:false,nativeEpoch:0,neuralTried:false,finalTried:false,voices:[],attempted:new Set()};
   const active = () => !session.finished && currentSpeech === session && !session.abort.signal.aborted;
-  session.finish = (event = { status: 'ended' }) => {
+  session.finish = (event = {status:'ended'}) => {
     if (!active()) return false;
-    session.finished = true;
-    clearTimeout(session.timer);
-    currentSpeech = null;
-    if (typeof onEnd === 'function') onEnd(event);
-    return true;
+    session.finished = true; clearTimeout(session.timer); currentSpeech = null;
+    onEnd?.(event); return true;
   };
   currentSpeech = session;
-  const fail = error => {
-    if (!active()) return;
-    const message = error?.message || 'Не получилось включить звук. Нажми кнопку ещё раз и проверь, что звук вкладки включён.';
-    if (typeof onError === 'function') onError(message);
-    session.finish({ status: 'error', error: message });
+  const fail = error => { if (!active()) return; const message=error?.message || 'Не получилось включить звук. Проверь звук вкладки.'; onError?.(message);session.finish({status:'error',error:message}); };
+  const retireNative = () => {
+    session.nativeEpoch++; clearTimeout(session.timer);
+    if (session.utterance) session.utterance.onend = session.utterance.onerror = session.utterance.onstart = null;
+    try { globalThis.speechSynthesis?.cancel(); } catch { /* Optional native API. */ }
   };
-  const fallback = async () => {
-    if (!active() || session.fallback) return;
-    session.fallback = true;
-    clearTimeout(session.timer);
-    if (session.utterance) {
-      session.utterance.onend = session.utterance.onerror = session.utterance.onstart = null;
-      try { globalThis.speechSynthesis?.cancel(); } catch { /* Optional API. */ }
-    }
+  const playBlob = async (blob,info) => {
+    if (!active()) return;
+    if (!await unlocking || !await unlockAudio()) throw new Error('Браузер не включил звук. Нажми «Прослушать» ещё раз и проверь звук вкладки.');
+    if (!active()) return;
+    const buffer = await audioContext.decodeAudioData(await blob.arrayBuffer());
+    if (!active()) return;
+    const source = session.source = audioContext.createBufferSource(); source.buffer = buffer; source.connect(audioContext.destination);
+    source.onended = () => { source.disconnect();session.finish({status:'ended',...info}); };
+    source.start();onStart?.(info);if(info.cacheWarning)onNotice?.(info.cacheWarning);
+  };
+  const generated = async engine => {
+    const model=neuralModel(neuralId), identity = engine === 'cloud' ? cloudSpeechIdentity(cloud,language) : {engine:'neural',type:'local',name:model.name,lang:model.lang,model:model.id};
+    if (engine === 'neural' && model.lang.split('-')[0] !== language.split('-')[0]) throw new Error('Эта модель Piper предназначена для английского. Для другого языка использую голос браузера.');
+    const result = await cachedSpeechAudio(content,{identity,lang:language,rate:speed,cacheEntries,signal:session.abort.signal,onCache,
+      synthesize:async()=>{
+        if(engine === 'cloud') {
+          if(globalThis.navigator?.onLine === false) throw new Error('Нет интернета для нового облачного аудио. Сохранённые записи доступны офлайн.');
+          return synthesizeCloudSpeech(content,{config:cloud,lang:language,rate:speed,key:await getTTSKey(identity.provider),signal:session.abort.signal});
+        }
+        return synthesizeNeuralSpeech(content,{modelId:model.id,rate:speed,signal:session.abort.signal});
+      },
+    });
+    await playBlob(result.blob,result.info);
+  };
+  const finalFallback = async () => {
+    if (!active() || session.finalTried) return;
+    session.finalTried=true;retireNative();
     try {
-      const blob = await synthesizeSpeech(content, { lang: language, rate: speed, signal: session.abort.signal });
-      if (!active()) return;
-      if (!await unlocking || !await unlockAudio()) throw new Error('Браузер не включил звук. Нажми «Прослушать» ещё раз и проверь звук вкладки.');
-      if (!active()) return;
-      const buffer = await audioContext.decodeAudioData(await blob.arrayBuffer());
-      if (!active()) return;
-      const source = session.source = audioContext.createBufferSource();
-      source.buffer = buffer;
-      source.connect(audioContext.destination);
-      source.onended = () => {
-        source.disconnect();
-        session.finish({ status: 'ended', engine: 'offline' });
-      };
-      source.start();
-      if (typeof onStart === 'function') onStart({ engine: 'offline' });
-    } catch (error) {
-      if (error?.name !== 'AbortError') fail(error);
+      const blob=await synthesizeSpeech(content,{lang:language,rate:speed,signal:session.abort.signal});
+      await playBlob(blob,{engine:'offline',type:'fallback',name:'eSpeak',lang:language});
+    } catch(error) { if(error?.name !== 'AbortError')fail(error); }
+  };
+  const attemptNative = selected => {
+    if(!active() || !selected)return;
+    retireNative();const epoch=session.nativeEpoch;
+    session.attempted.add(selected.voiceURI || `${selected.name}|${selected.lang}`);
+    const current = () => active() && session.nativeEpoch===epoch;
+    const identity={engine:'system',...describeSpeechVoice(selected)};
+    const next=()=>{if(!current())return;retireNative();void fallbackChain();};
+    try {
+      const utterance=session.utterance=new globalThis.SpeechSynthesisUtterance(content);
+      utterance.voice=selected;utterance.lang=String(selected.lang || language).replace(/_/g,'-');utterance.rate=speed;utterance.pitch=1;utterance.volume=1;
+      utterance.onstart=()=>{if(!current())return;clearTimeout(session.timer);session.timer=setTimeout(next,Math.min(90000,6000+content.length*150/speed));onStart?.(identity);};
+      utterance.onend=()=>{if(current())session.finish({status:'ended',...identity});};
+      utterance.onerror=next;
+      setTimeout(()=>{
+        if(!current())return;
+        session.timer=setTimeout(()=>{onNotice?.(`Голос «${selected.name}» не начал говорить. Пробую следующий доступный голос.`);next();},selected.localService === false ? 6000 : 2000);
+        globalThis.speechSynthesis.speak(utterance);
+        if(globalThis.speechSynthesis.paused)globalThis.speechSynthesis.resume();
+      },30);
+    }catch{next();}
+  };
+  const fallbackChain = async () => {
+    if(!active())return;
+    const model=neuralModel(neuralId);
+    if(!session.neuralTried && model.lang.split('-')[0]===language.split('-')[0]) {
+      session.neuralTried=true;
+      try { if(await neuralModelInstalled(model.id)){await generated('neural');return;} }
+      catch(error){if(error?.name==='AbortError')return;onNotice?.(error.message);}
     }
+    if(!active())return;
+    const local=selectSpeechVoice(session.voices.filter(item=>!session.attempted.has(item.voiceURI || `${item.name}|${item.lang}`)),language,'auto',{localOnly:true});
+    if(local && session.attempted.size < 3 && globalThis.SpeechSynthesisUtterance){attemptNative(local);return;}
+    await finalFallback();
   };
   const start = async () => {
-    const synthesis = globalThis.speechSynthesis;
-    const Utterance = globalThis.SpeechSynthesisUtterance;
-    if (voice === 'offline' || String(voice).startsWith('offline-') || !synthesis || !Utterance) { void fallback(); return; }
-    const voices = await waitForVoices(synthesis, session.abort.signal);
-    if (!active()) return;
-    const prefix = language.split('-')[0].toLowerCase();
-    // Remote native voices may send card text to their provider. A stored remote
-    // voice ID must fall back to an installed voice or the bundled synthesizer.
-    const available = voices.filter(item => item.localService && String(item.lang).toLowerCase().split('-')[0] === prefix);
-    const requested = available.find(item => (item.voiceURI || item.name) === voice);
-    // Prefer genuinely installed voices: remote-only voices silently fail offline.
-    const selected = requested
-      || available.find(item => item.localService && item.lang.toLowerCase() === language.toLowerCase())
-      || available.find(item => item.localService);
-    if (!selected) { void fallback(); return; }
-    try {
-      const utterance = session.utterance = new Utterance(content);
-      utterance.voice = selected;
-      utterance.lang = language;
-      utterance.rate = speed;
-      utterance.pitch = 1;
-      utterance.volume = 1;
-      utterance.onstart = () => {
-        if (!active() || session.fallback) return;
-        clearTimeout(session.timer);
-        // Some engines disappear without onend/onerror after starting.
-        session.timer = setTimeout(() => { void fallback(); }, Math.min(90000, 6000 + content.length * 150 / speed));
-        if (typeof onStart === 'function') onStart({ engine: 'system' });
-      };
-      utterance.onend = () => { if (!session.fallback) session.finish({ status: 'ended', engine: 'system' }); };
-      utterance.onerror = () => { if (active()) void fallback(); };
-      // Short cancellation/start separation avoids a WebKit queue race.
-      await new Promise(resolve => setTimeout(resolve, 30));
-      if (!active()) return;
-      session.timer = setTimeout(() => { void fallback(); }, 2000);
-      synthesis.speak(utterance);
-      if (synthesis.paused) synthesis.resume();
-    } catch { void fallback(); }
+    const synthesis=globalThis.speechSynthesis;
+    session.voices=await waitForVoices(synthesis,session.abort.signal);
+    if(!active())return;
+    // Legacy explicit eSpeak selection remains available to callers/tests;
+    // the settings UI offers automatic, live cloud and local neural modes.
+    if(voice === 'offline' || String(voice).startsWith('offline-')){await finalFallback();return;}
+    if(voice === 'cloud') {
+      try {await generated('cloud');return;}
+      catch(error){if(error?.name==='AbortError')return;onNotice?.(error.message);}
+    }
+    if(voice === 'neural') {
+      session.neuralTried=true;
+      try {await generated('neural');return;}
+      catch(error){if(error?.name==='AbortError')return;onNotice?.(error.message);}
+    }
+    if(!active())return;
+    const requested=['auto','cloud','neural'].includes(voice) ? systemVoice : voice;
+    const voices=globalThis.navigator?.onLine === false ? session.voices.filter(item=>item.localService !== false) : session.voices;
+    const selected=selectSpeechVoice(voices,language,requested);
+    if (selected && requested === 'auto' && voiceQuality(selected) < 0 && !session.neuralTried) {
+      const model=neuralModel(neuralId);session.neuralTried=true;
+      try { if (model.lang.split('-')[0]===language.split('-')[0] && await neuralModelInstalled(model.id)) { await generated('neural');return; } }
+      catch(error) { if(error?.name==='AbortError')return;onNotice?.(error.message); }
+    }
+    if(selected && synthesis && globalThis.SpeechSynthesisUtterance){attemptNative(selected);return;}
+    await fallbackChain();
   };
-  void start().catch(() => { void fallback(); });
-  return { ok: true };
+  void start().catch(fail);
+  return {ok:true};
 }
 
 export function stopAudio() {

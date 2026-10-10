@@ -1,0 +1,44 @@
+Local neural speech: Piper, VITS and ONNX Runtime Web
+
+Bundled phonemizer JS factory (unmodified):
+@diffusionstudio/vits-web 1.0.3, dist/piper-DeOu3H9E.js
+Author: Konstantin Paulus <mail@konstantinpaulus.de>
+License: MIT, as declared by the published package metadata.
+Source: https://github.com/diffusionstudio/vits-web
+NPM package: https://registry.npmjs.org/@diffusionstudio/vits-web/-/vits-web-1.0.3.tgz
+Package SHA-512 (npm dist.integrity, verified before extraction):
+xvOmc3CTWXGKbyiLbsrMczNArm7Z0Bi0h3pij0RTX6SytY/NSqd7h5DdPNUUhBt0nSjWGbo5RIrJLoCQTUQ0nQ==
+Vendored factory SHA-256: e2701cb8c73580ab395a67ad036ea1a4a9e50500c33c8b8499d159c3638451f3
+The npm archive contains no separate LICENSE file; the MIT notice in
+licenses/DIFFUSIONSTUDIO-MIT.txt preserves its declared author and license.
+
+Downloaded phonemizer WASM/data (not included in the HTML or ZIP):
+@diffusionstudio/piper-wasm 1.0.0
+Author: Konstantin Paulus. Package license declaration: MIT.
+Source and build scripts: https://github.com/diffusion-studio/piper-wasm
+Piper source: https://github.com/rhasspy/piper
+Piper MIT license: licenses/PIPER-MIT.txt, copyright 2022 Michael Hansen.
+The phonemizer includes eSpeak NG, GNU GPLv3:
+https://github.com/espeak-ng/espeak-ng/tree/1.51
+Full upstream GPLv3 text: licenses/ESPEAK-NG-GPL-3.txt.
+The application's GPLv3 distribution is compatible with this dependency.
+Engine SHA-256 checksums are pinned and verified in src/neural-assets.js.
+
+ONNX Runtime Web/common 1.18.0, copyright Microsoft Corporation.
+License: MIT, full upstream text in licenses/ONNX-RUNTIME-MIT.txt.
+Source and build instructions: https://github.com/microsoft/onnxruntime/tree/v1.18.0
+JavaScript is bundled; WASM is downloaded only at the user's request,
+verified and cached in IndexedDB. No WASM or voice model is shipped in the ZIP.
+
+Voice model weights are separate downloads, not covered by a blanket MIT
+statement. Each voice has its own upstream MODEL_CARD with dataset/license
+conditions, saved alongside the model. The settings link to that model card:
+https://huggingface.co/rhasspy/piper-voices/tree/main/en/en_US/lessac/medium
+https://huggingface.co/rhasspy/piper-voices/tree/main/en/en_GB/alba/medium
+The test fixture uses the official rhasspy/piper v0.0.2 Lessac release.
+
+Local implementation: src/neural-assets.js, src/neural-worker.js,
+src/neural-speech.js, src/cloud-speech.js, src/tts-storage.js,
+src/speech-voices.js and src/speech-settings.js. These source files and
+package-lock.json are included for reproducible builds and modification.
+The original eSpeak/speak.js notice and GPL comment remain unchanged.

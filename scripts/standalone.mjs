@@ -25,8 +25,11 @@ const speechNotice = await readFile(resolve(root, 'src/voice/NOTICE'), 'utf8');
 const speechLicense = await readFile(resolve(root, 'src/voice/LICENSE'), 'utf8');
 const licenseComment = `${speechNotice}\n${speechLicense}`;
 if (/-->|--!>/.test(licenseComment)) throw new Error('Speech license must be embedded as a safe, verbatim HTML comment.');
+const neuralComment = (await Promise.all(['src/voice/PIPER-NOTICE','licenses/DIFFUSIONSTUDIO-MIT.txt','licenses/PIPER-MIT.txt','licenses/ONNX-RUNTIME-MIT.txt'].map(name=>readFile(resolve(root,name),'utf8')))).join('\n');
+if (/-->|--!>/.test(neuralComment)) throw new Error('Neural speech notice must be embedded as a safe, verbatim HTML comment.');
 const html = `<!doctype html>
 <!-- Local speech engine license and source information:\n${licenseComment}\n-->
+<!-- Optional neural speech licenses and source information:\n${neuralComment}\n-->
 <html lang="ru"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#f5f7f3">

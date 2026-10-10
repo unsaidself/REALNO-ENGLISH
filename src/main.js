@@ -1,3 +1,4 @@
+import { renderSpeechSettings, mountSpeechSettings, showSpeechDiagnostics } from './speech-settings.js';
 import { createAutoBackup } from './auto-backup.js';
 import { startPWA, installApplication } from './pwa.js';
 import { limitedNewCards, introduceCard } from './learning-plan.js';
@@ -79,6 +80,7 @@ const categoryKey = value => cleanCategory(value).toLocaleLowerCase('ru');
 function prepareData(value) {
   ensurePracticeData(value); ensureRankData(value);
   if (!Number.isFinite(value.backupReminderSince) || value.backupReminderSince <= 0) value.backupReminderSince = Date.now();
+  if (value.settings.speechVoice === 'offline' || String(value.settings.speechVoice || '').startsWith('offline-')) value.settings.speechVoice = 'auto';
   value.settings.name = typeof value.settings.name === 'string' && value.settings.name.trim() ? value.settings.name.trim().slice(0, 40) : 'Ученик';
   value.categories = [...(Array.isArray(value.categories) ? value.categories : []), ...value.sets.map(s => s.category)].reduce((list, value) => {
   const name = cleanCategory(value);
@@ -94,7 +96,7 @@ void autoBackup.initialize();
 let movieFilter = '';
 let page = 'home', filter = null, query = '', session = null, direction = 'normal';
 let modalExitGuard = null, editorDirty = () => false;
-let toastTimer, matchController, pronunciationController, deckEditorController, modalReturnFocus = null, speechUIRequest = 0;
+let toastTimer, matchController, pronunciationController, deckEditorController, speechSettingsController, modalReturnFocus = null, speechUIRequest = 0;
 let calendarMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const normalize = value => String(value).toLowerCase().replace(/ё/g, 'е').replace(/[.,!?]/g, '').trim().replace(/\s+/g, ' ');
@@ -155,6 +157,7 @@ function getDueCards(value, setId = null) {
 }
 function resumeStudy() { if (getDueCards(data).length) startReview(); else { const set = lastStudySet(); set ? openSet(set.id) : editor(); } }
 function render() {
+  speechSettingsController?.destroy(); speechSettingsController = null;
   cleanupSession(); session = null;
   document.body.classList.remove('has-modal');
   applyTheme(data.settings);
@@ -204,7 +207,7 @@ function calendarPanel() {
 }
 function settingsPage() {
   const prefs = data.settings;
-  return `<section class="settings-panel"><div class="setting-group"><h2>Профиль</h2><label for="profile-name">Имя</label><input id="profile-name" name="name" type="text" maxlength="40" value="${esc(prefs.name || 'Ученик')}" placeholder="Ученик" autocomplete="nickname"></div><div class="setting-group"><h2>${icon('moon')} Тема</h2><p>Светлая, тёмная или как на устройстве.</p><div class="theme-options">${[['light', 'Светлая', 'sun'], ['dark', 'Тёмная', 'moon'], ['system', 'Системная', 'settings']].map(([value, label, glyph]) => `<button class="secondary ${prefs.theme === value ? 'selected' : ''}" data-theme-choice="${value}" aria-pressed="${prefs.theme === value}">${icon(glyph)}${label}</button>`).join('')}</div></div><div class="setting-group"><h2>Акцентный цвет</h2><div class="accent-options">${[['teal', 'Зелёный'], ['blue', 'Синий'], ['orange', 'Терракота'], ['rose', 'Розовый'], ['graphite', 'Графит']].map(([value, label]) => `<button class="accent-swatch ${prefs.accent === value ? 'selected' : ''}" data-accent-choice="${value}" aria-label="${label}" aria-pressed="${prefs.accent === value}"><span></span>${label}</button>`).join('')}</div></div><div class="setting-group"><h2>${icon('target')} Ежедневная цель</h2><label class="goal-label" for="daily-goal">Ответов в день</label><input id="daily-goal" type="number" min="1" max="500" step="1" value="${prefs.goal}"><p>Считаются ответы в карточках, тестах, запоминании и игре.</p></div><div class="setting-row"><div><h2>${icon('sound')} Звуки</h2><p>Ответы, переворот карточек, совпадения и серии.</p></div><label class="toggle" for="setting-sounds"><input type="checkbox" id="setting-sounds" aria-label="Звуковые эффекты" ${prefs.sounds ? 'checked' : ''}><span></span><b>${prefs.sounds ? 'Включены' : 'Выключены'}</b></label></div><div class="setting-group"><h2>Ритм обучения</h2><label for="daily-new-limit">Новых карточек в день</label><input id="daily-new-limit" type="number" min="0" max="500" value="${Number.isInteger(prefs.newCardsPerDay) ? prefs.newCardsPerDay : 20}"><p>Знакомые карточки продолжают повторяться. 0 — только знакомые.</p><label for="reminder-time">Время напоминания</label><input type="time" id="reminder-time" value="${esc(prefs.reminderTime || '19:00')}"><button class="secondary" id="enable-reminders">${prefs.remindersOn ? 'Выключить напоминания' : 'Включить напоминания'}</button><p id="reminder-status" role="status">Напоминание работает, пока приложение открыто; закрытый браузер не поддерживает гарантированное офлайн-расписание.</p><button class="secondary" id="install-app">Установить на телефон</button><p id="install-status" role="status"></p></div><div class="setting-group speech-settings"><h2>${icon('sound')} Озвучка слов</h2><label for="speech-voice">Голосовой движок</label><select id="speech-voice"><option value="auto" ${(prefs.speechVoice || 'auto') === 'auto' ? 'selected' : ''}>Автоматически — голос устройства и локальный запасной</option><option value="offline" ${prefs.speechVoice === 'offline' ? 'selected' : ''}>Встроенный локальный голос</option></select><label for="speech-accent">Английский акцент</label><select id="speech-accent"><option value="en-US" ${prefs.speechAccent !== 'en-GB' ? 'selected' : ''}>Американский (US)</option><option value="en-GB" ${prefs.speechAccent === 'en-GB' ? 'selected' : ''}>Британский (UK)</option></select><label for="speech-rate">Скорость <b id="speech-rate-label">${prefs.speechRate || .9}×</b></label><input type="range" id="speech-rate" min="0.5" max="1.5" step="0.1" value="${prefs.speechRate || .9}"><p>Английский и русский работают без скачивания системных голосов. Встроенный голос звучит более механически.</p><button class="secondary" id="speech-demo">${icon('sound')} Проверить озвучку</button></div><div id="settings-error" class="form-error" role="alert"></div><p class="settings-autosave">Изменения сохраняются автоматически.</p><section class="danger-zone"><h2>Сброс обучения</h2><p>Начни заново: статистика, расписание повторений и опыт рангов будут обнулены.</p><button class="secondary danger-text" id="reset-all-progress">Сбросить весь прогресс</button></section></section>`;
+  return `<section class="settings-panel"><div class="setting-group"><h2>Профиль</h2><label for="profile-name">Имя</label><input id="profile-name" name="name" type="text" maxlength="40" value="${esc(prefs.name || 'Ученик')}" placeholder="Ученик" autocomplete="nickname"></div><div class="setting-group"><h2>${icon('moon')} Тема</h2><p>Светлая, тёмная или как на устройстве.</p><div class="theme-options">${[['light', 'Светлая', 'sun'], ['dark', 'Тёмная', 'moon'], ['system', 'Системная', 'settings']].map(([value, label, glyph]) => `<button class="secondary ${prefs.theme === value ? 'selected' : ''}" data-theme-choice="${value}" aria-pressed="${prefs.theme === value}">${icon(glyph)}${label}</button>`).join('')}</div></div><div class="setting-group"><h2>Акцентный цвет</h2><div class="accent-options">${[['teal', 'Зелёный'], ['blue', 'Синий'], ['orange', 'Терракота'], ['rose', 'Розовый'], ['graphite', 'Графит']].map(([value, label]) => `<button class="accent-swatch ${prefs.accent === value ? 'selected' : ''}" data-accent-choice="${value}" aria-label="${label}" aria-pressed="${prefs.accent === value}"><span></span>${label}</button>`).join('')}</div></div><div class="setting-group"><h2>${icon('target')} Ежедневная цель</h2><label class="goal-label" for="daily-goal">Ответов в день</label><input id="daily-goal" type="number" min="1" max="500" step="1" value="${prefs.goal}"><p>Считаются ответы в карточках, тестах, запоминании и игре.</p></div><div class="setting-row"><div><h2>${icon('sound')} Звуки</h2><p>Ответы, переворот карточек, совпадения и серии.</p></div><label class="toggle" for="setting-sounds"><input type="checkbox" id="setting-sounds" aria-label="Звуковые эффекты" ${prefs.sounds ? 'checked' : ''}><span></span><b>${prefs.sounds ? 'Включены' : 'Выключены'}</b></label></div><div class="setting-group"><h2>Ритм обучения</h2><label for="daily-new-limit">Новых карточек в день</label><input id="daily-new-limit" type="number" min="0" max="500" value="${Number.isInteger(prefs.newCardsPerDay) ? prefs.newCardsPerDay : 20}"><p>Знакомые карточки продолжают повторяться. 0 — только знакомые.</p><label for="reminder-time">Время напоминания</label><input type="time" id="reminder-time" value="${esc(prefs.reminderTime || '19:00')}"><button class="secondary" id="enable-reminders">${prefs.remindersOn ? 'Выключить напоминания' : 'Включить напоминания'}</button><p id="reminder-status" role="status">Напоминание работает, пока приложение открыто; закрытый браузер не поддерживает гарантированное офлайн-расписание.</p><button class="secondary" id="install-app">Установить на телефон</button><p id="install-status" role="status"></p></div>${renderSpeechSettings(prefs,{esc,icon})}<div id="settings-error" class="form-error" role="alert"></div><p class="settings-autosave">Изменения сохраняются автоматически.</p><section class="danger-zone"><h2>Сброс обучения</h2><p>Начни заново: статистика, расписание повторений и опыт рангов будут обнулены.</p><button class="secondary danger-text" id="reset-all-progress">Сбросить весь прогресс</button></section></section>`;
 }
 function setCards() {
   const needle = normalize(query);
@@ -271,6 +274,7 @@ function bindAutoBackup() {
   updateAutoBackupUI();
 }
 function bindSettings() {
+  speechSettingsController = mountSpeechSettings(document.querySelector('.speech-settings'),{getSettings:()=>data.settings,save,pronounce,esc,notify});
   const updateProfile = () => {
     const name = profileName(), avatar = [...name][0].toLocaleUpperCase('ru');
     document.querySelector('.profile b').textContent = name;
@@ -295,8 +299,6 @@ function bindSettings() {
     toggle.title = `${e.target.checked ? 'Выключить' : 'Включить'} звуки`; toggle.setAttribute('aria-label', toggle.title); toggle.innerHTML = icon(e.target.checked ? 'sound' : 'mute');
     if (e.target.checked) playSound('click', true); else stopAudio();
   };
-  document.querySelector('#speech-rate').oninput = e => { data.settings.speechRate = Number(e.target.value); document.querySelector('#speech-rate-label').textContent = `${data.settings.speechRate}×`; save(); };
-  document.querySelector('#speech-accent').onchange = e => { data.settings.speechAccent = e.target.value; save(); };
   document.querySelector('#daily-new-limit').oninput = e => { const limit = Number(e.target.value); const valid = Number.isInteger(limit) && limit >= 0 && limit <= 500; e.target.setAttribute('aria-invalid', String(!valid)); if (valid) { data.settings.newCardsPerDay = limit; save(); } };
   document.querySelector('#reminder-time').onchange = e => { if (/^\d{2}:\d{2}$/.test(e.target.value)) { data.settings.reminderTime = e.target.value; save(); } };
   document.querySelector('#enable-reminders').onclick = async e => {
@@ -308,8 +310,6 @@ function bindSettings() {
     status.textContent = permission === 'granted' ? 'Напоминания включены, пока приложение открыто.' : 'Уведомления браузера не разрешены. Напоминание появится внутри открытого приложения.';
   };
   document.querySelector('#install-app').onclick = () => installApplication();
-  document.querySelector('#speech-voice').onchange = e => { data.settings.speechVoice = e.target.value; save(); };
-  document.querySelector('#speech-demo').onclick = e => pronounce('Learning a little every day makes a difference.', e.currentTarget);
   document.querySelector('#reset-all-progress').onclick = () => confirmDataAction({ title: 'Сбросить весь прогресс?', description: 'Будут обнулены ответы, календарь занятий, расписание повторений, результаты карточек и опыт рангов. Наборы, вложения и настройки сохранятся.', label: 'Сбросить прогресс', cancel: () => goPage('settings'), confirm: async () => { await commitReplacement(resetAllProgress(data)); goPage('settings'); notify('Весь прогресс сброшен'); } });
 }
 function bindSets() {
@@ -576,7 +576,7 @@ function startPronunciation(set, index = 0) {
   session = null;
   modal(`<div class="eyebrow">Произношение · ${esc(set.title)}</div><div id="pronunciation-root"></div><div class="study-actions pronunciation-navigation"><button class="secondary" id="pronunciation-prev" ${!index ? 'disabled' : ''}>← Предыдущее слово</button><span>${index + 1} / ${cards.length}</span><button class="secondary" id="pronunciation-next" ${index === cards.length - 1 ? 'disabled' : ''}>Следующее слово →</button></div>`, () => openSet(set.id));
   modalExitGuard = protectModal({ isDirty: () => Boolean(pronunciationController?.hasRecording()), message: 'Запись произношения хранится только в этом занятии. Скачай её перед выходом.' });
-  pronunciationController = mountPronunciation(document.querySelector('#pronunciation-root'), cards[index], { esc, icon, pronounce, sound, notify, onExit: () => document.querySelector('.close').click() });
+  pronunciationController = mountPronunciation(document.querySelector('#pronunciation-root'), cards[index], { esc, icon, pronounce: (text,button,options) => pronounce(text,button,{...options,card:cards[index]}), sound, notify, onExit: () => document.querySelector('.close').click() });
   document.querySelector('#pronunciation-prev').onclick = () => { if (index > 0) modalExitGuard(() => startPronunciation(set, index - 1)); };
   document.querySelector('#pronunciation-next').onclick = () => { if (index < cards.length - 1) modalExitGuard(() => startPronunciation(set, index + 1)); };
 }
@@ -609,8 +609,30 @@ async function pronounce(text, button, options = {}) {
     if (button?.dataset.speechRequest === request) { button.classList.remove('is-speaking'); button.setAttribute('aria-busy', 'false'); }
     if (status?.dataset.request === request) status.textContent = '';
   };
-  const result = await speakText(text, { voice: options.voice || data.settings.speechVoice || 'auto', rate: options.rate ?? data.settings.speechRate ?? .9, lang: options.lang || (/[а-яё]/i.test(String(text)) ? 'ru-RU' : data.settings.speechAccent || 'en-US'),
-    onStart: () => { if (status?.dataset.request === request) status.textContent = ''; },
+  const card = options.card, settings = data.settings;
+  const engine = options.voice || settings.speechVoice || 'auto';
+  const result = await speakText(text, {
+    voice: engine, systemVoice: options.systemVoice || settings.systemVoice || 'auto', cloud: settings.cloudSpeech || {}, neuralId: options.neuralId || settings.neuralModelId,
+    cacheEntries: card?.[2]?.ttsClips,
+    onCache: (key,entry) => {
+      const id=card?.[2]?.id;
+      if(!id)return;
+      const live = data.sets.flatMap(set=>set.cards).find(item=>item[2]?.id===id);
+      if(!live)return;
+      live[2].ttsClips ||= {};live[2].ttsClips[key]=entry;save();
+    },
+    rate: options.rate ?? settings.speechRate ?? .9,
+    lang: options.lang || (/[а-яё]/i.test(String(text)) ? 'ru-RU' : settings.speechAccent || 'en-US'),
+    onStart: info => {
+      if(status?.dataset.request !== request)return;
+      status.textContent='';
+      if(parent && !parent.querySelector('#speech-active-voice, .speech-identity')) {
+        const identity=document.createElement('p');identity.className='speech-identity';identity.setAttribute('role','status');
+        const help=document.createElement('div');help.className='speech-fallback-help';help.hidden=true;status.after(identity,help);
+      }
+      showSpeechDiagnostics(parent,info);
+    },
+    onNotice: message => { if(status?.dataset.request===request)status.textContent=message; },
     onEnd: event => { cleanup(); if (!event?.cancelled && !event?.error && (!event?.status || event.status === 'ended')) options.onEnd?.(); },
     onError: message => { options.onError?.(message); notify(message); },
   });
@@ -646,8 +668,8 @@ function study() {
   document.querySelector('#star-card')?.addEventListener('click', e => { card[2].starred = !card[2].starred; save(); e.currentTarget.setAttribute('aria-pressed', String(card[2].starred)); e.currentTarget.innerHTML = `${icon('star')} ${card[2].starred ? 'Убрать звёздочку' : 'Сложная'}`; });
   document.querySelector('#edit-study-card')?.addEventListener('click', () => quickCard({ card, studySession: s }));
   hydrateAttachments(document.querySelector('.modal'));
-  document.querySelector('#speak-term').onclick = e => pronounce(cloze?.sentence || listening?.prompt || (isCard ? card[0] : prompt), e.currentTarget);
-  document.querySelector('#speak-example')?.addEventListener('click', e => pronounce(card[2].example, e.currentTarget));
+  document.querySelector('#speak-term').onclick = e => pronounce(cloze?.sentence || listening?.prompt || (isCard ? card[0] : prompt), e.currentTarget,{card});
+  document.querySelector('#speak-example')?.addEventListener('click', e => pronounce(card[2].example, e.currentTarget,{card}));
   if (isCard) {
     document.querySelector('#flip').onclick = e => {
       s.flipped = !s.flipped; e.currentTarget.classList.toggle('is-flipped', s.flipped); e.currentTarget.setAttribute('aria-pressed', String(s.flipped));

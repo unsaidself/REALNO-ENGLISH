@@ -965,3 +965,16 @@ kbd { display: inline-block; padding: 1px 6px; border: 1px solid var(--line-stro
   .nav .nav-label { display: none; }
   .nav .nav-label-mobile { display: inline; font-size: 12px; line-height: 1.25; }
 }
+.speech-voice-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.speech-voice-row b, .speech-voice-row small { display: block; overflow-wrap: anywhere; }
+.speech-voice-row small { color: var(--muted); margin-top: 4px; }
+.speech-provider-fields { margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--line); }
+.speech-provider-fields [hidden] { display: none !important; }
+.speech-provider-fields h3 { font-size: 23px; }
+.remember-key-label { display: flex; gap: 12px; align-items: center; min-height: 44px; }
+.remember-key-label input { width: 22px; height: 22px; }
+.speech-settings progress { width: 100%; height: 20px; margin-top: 18px; accent-color: var(--accent); }
+.speech-identity, #speech-active-voice { overflow-wrap: anywhere; color: var(--muted); font-size: 15px; }
+.speech-fallback-help, #speech-fallback-help { background: var(--surface-alt); padding: 16px; border: 1px solid var(--line); border-radius: 12px; }
+.speech-fallback-help a, #speech-fallback-help a { color: var(--accent); display: inline-flex; align-items: center; min-height: 44px; }
+@media (max-width: 480px) { .speech-voice-row { gap: 8px; } .speech-voice-row .secondary { padding: 10px; } }

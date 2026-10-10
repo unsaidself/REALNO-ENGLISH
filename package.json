@@ -13,5 +13,8 @@
   "devDependencies": {
     "fake-indexeddb": "^6.2.5",
     "vite": "^7.1.0"
+  },
+  "dependencies": {
+    "onnxruntime-web": "1.18.0"
   }
 }
