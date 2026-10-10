@@ -1,3 +1,4 @@
+import { parseCardText, duplicateCards, duplicateKey } from './card-text.js';
 /** Card rows keep their own identity and metadata throughout every draft edit. */
 const PAGE_SIZE = 40;
 const CARD_LIMIT = 100000;
@@ -9,22 +10,10 @@ function freshId(reserved) {
   reserved.add(id); return id;
 }
 
-export function parseBulkCards(value) {
-  const cards = [];
-  for (const [lineIndex, line] of String(value || '').split(/\r?\n/).entries()) {
-    if (!line.trim()) continue;
-    const divider = line.indexOf(';');
-    const term = divider < 0 ? '' : line.slice(0, divider).trim();
-    const definition = divider < 0 ? '' : line.slice(divider + 1).trim();
-    if (!term || !definition) throw new Error(`Строка ${lineIndex + 1}: нужны термин и определение через «;».`);
-    cards.push([term, definition]);
-  }
-  if (!cards.length) throw new Error('Вставь хотя бы одну пару «термин; определение».');
-  return cards;
-}
+export const parseBulkCards = parseCardText;
 
 /** Mount inside the existing modal/form; the app retains its focus trap. */
-export function mountDeckEditor(root, originalCards = [], { esc, icon, countLabel } = {}) {
+export function mountDeckEditor(root, originalCards = [], { esc, icon, countLabel, onChange = () => {} } = {}) {
   if (!root || typeof esc !== 'function' || typeof icon !== 'function' || typeof countLabel !== 'function') throw new TypeError('Не удалось открыть редактор карточек.');
   const original = structuredClone(originalCards);
   const reserved = new Set(original.map(card => String(card[2]?.id || '')).filter(Boolean));
@@ -40,7 +29,8 @@ export function mountDeckEditor(root, originalCards = [], { esc, icon, countLabe
   let page = 0;
   const prefix = `deck-${(++sequence).toString(36)}`;
   root.classList.add('deck-editor');
-  root.innerHTML = `<div class="deck-editor-heading"><h3>Карточки</h3><span class="deck-editor-total" role="status"></span></div><p class="field-caption">Редактируй термин и определение отдельно. Картинка, аудио и прогресс остаются у своей карточки.</p><div class="deck-editor-rows"></div><div class="deck-editor-pagination"></div><button class="secondary deck-add-row" type="button" data-editor-action="add">${icon('plus')} Добавить карточку</button><details class="deck-bulk"><summary>Массовая вставка текстом</summary><label for="${prefix}-bulk">Карточки из текста<textarea id="${prefix}-bulk" rows="5" placeholder="Train; Поезд&#10;Ticket; Билет"></textarea><small>Одна пара «термин; определение» в каждой строке. Новые карточки добавятся в конец; существующие карточки и вложения сохранятся.</small></label><div class="form-error deck-bulk-error" role="alert"></div><button class="secondary" type="button" data-editor-action="append">${icon('plus')} Добавить из текста</button></details><p class="deck-editor-status" role="status" aria-live="polite"></p>`;
+  root.innerHTML = `<div class="deck-editor-heading"><h3>Карточки</h3><span class="deck-editor-total" role="status"></span></div><p class="field-caption">Редактируй термин и определение отдельно. Картинка, аудио и прогресс остаются у своей карточки.</p><div class="deck-editor-rows"></div><div class="deck-editor-pagination"></div><button class="secondary deck-add-row" type="button" data-editor-action="add">${icon('plus')} Добавить карточку</button><details class="deck-bulk"><summary>Вставить из Quizlet / текста</summary><label for="${prefix}-bulk">Карточки из текста<textarea id="${prefix}-bulk" rows="5" placeholder="Train; Поезд&#10;Ticket; Билет"></textarea></label><div class="bulk-options"><label for="${prefix}-separator">Разделитель<select id="${prefix}-separator"><option value="auto">Определить автоматически</option><option value="tab">Таб (Quizlet)</option><option value=";">Точка с запятой</option><option value=",">Запятая (CSV)</option><option value="dash">Дефис с пробелами</option></select></label><label for="${prefix}-boundary">Если разделителей несколько<select id="${prefix}-boundary"><option value="strict">Кавычки или шапка CSV</option><option value="first">Первый разделяет поля</option><option value="last">Последний разделяет поля</option></select></label><label for="${prefix}-duplicates">Повторяющиеся термины<select id="${prefix}-duplicates"><option value="skip">Пропустить дубликаты</option><option value="keep">Добавить дубликаты</option></select></label></div><p class="field-caption">Поддерживаются шапка, BOM и двойные кавычки CSV. Проверь предпросмотр: текст с разделителем внутри поля заключи в кавычки.</p><div class="deck-bulk-error form-error" role="alert"></div><div class="bulk-preview" aria-live="polite"></div><button class="secondary" type="button" data-editor-action="append">${icon('plus')} Добавить из текста</button></details><p class="deck-editor-status" role="status" aria-live="polite"></p>`;
+  const initialRows = JSON.stringify(rows);
   const rowsRoot = root.querySelector('.deck-editor-rows');
   const pagination = root.querySelector('.deck-editor-pagination');
   const status = root.querySelector('.deck-editor-status');
@@ -53,7 +43,7 @@ export function mountDeckEditor(root, originalCards = [], { esc, icon, countLabe
     rowsRoot.innerHTML = rows.slice(start, start + PAGE_SIZE).map((card, offset) => {
       const index = start + offset;
       const attachments = [card[2]?.imageId && 'картинка', card[2]?.audioId && 'аудиозапись', card[2]?.example && 'пример'].filter(Boolean);
-      return `<section class="deck-editor-row" data-row-index="${index}" data-card-id="${esc(card[2].id)}" aria-label="Карточка ${index + 1}"><div class="deck-row-heading"><b>Карточка ${index + 1}</b><div class="deck-row-actions"><button class="icon-button" type="button" data-editor-action="up" aria-label="Поднять карточку ${index + 1} выше" title="Вверх" ${index === 0 ? 'disabled' : ''}>↑</button><button class="icon-button" type="button" data-editor-action="down" aria-label="Опустить карточку ${index + 1} ниже" title="Вниз" ${index === rows.length - 1 ? 'disabled' : ''}>↓</button><button class="icon-button deck-remove-row" type="button" data-editor-action="remove" aria-label="Удалить карточку ${index + 1}" title="Удалить карточку">${icon('close')}</button></div></div><div class="deck-row-fields"><label for="${prefix}-term-${index}">Термин<textarea id="${prefix}-term-${index}" data-card-field="0" rows="2" required>${esc(card[0])}</textarea></label><label for="${prefix}-definition-${index}">Определение<textarea id="${prefix}-definition-${index}" data-card-field="1" rows="2" required>${esc(card[1])}</textarea></label></div>${attachments.length ? `<p class="deck-row-media">${icon('archive')} Есть: ${esc(attachments.join(', '))}</p>` : ''}</section>`;
+      return `<section class="deck-editor-row" data-row-index="${index}" data-card-id="${esc(card[2].id)}" aria-label="Карточка ${index + 1}"><div class="deck-row-heading"><b>Карточка ${index + 1}</b><div class="deck-row-actions"><button class="icon-button" type="button" data-editor-action="up" aria-label="Поднять карточку ${index + 1} выше" title="Вверх" ${index === 0 ? 'disabled' : ''}>↑</button><button class="icon-button" type="button" data-editor-action="down" aria-label="Опустить карточку ${index + 1} ниже" title="Вниз" ${index === rows.length - 1 ? 'disabled' : ''}>↓</button><button class="icon-button deck-remove-row" type="button" data-editor-action="remove" aria-label="Удалить карточку ${index + 1}" title="Удалить карточку">${icon('close')}</button></div></div><div class="deck-row-fields"><label for="${prefix}-term-${index}">Термин<textarea id="${prefix}-term-${index}" data-card-field="0" rows="2" required>${esc(card[0])}</textarea></label><label for="${prefix}-definition-${index}">Определение<textarea id="${prefix}-definition-${index}" data-card-field="1" rows="2" required>${esc(card[1])}</textarea></label></div><details class="card-source-fields"><summary>Источник: фильм или сериал</summary>${[['film', 'Фильм / сериал'], ['episode', 'Сезон и серия'], ['timecode', 'Таймкод']].map(([key, label]) => `<label for="${prefix}-${key}-${index}">${label}<input id="${prefix}-${key}-${index}" data-meta-field="${key}" value="${esc(card[2][key] || '')}" maxlength="120"></label>`).join('')}</details>${attachments.length ? `<p class="deck-row-media">${icon('archive')} Есть: ${esc(attachments.join(', '))}</p>` : ''}</section>`;
     }).join('');
     pagination.innerHTML = pages > 1 ? `<button class="secondary" type="button" data-editor-action="previous" ${page === 0 ? 'disabled' : ''}>← Назад</button><span>Карточки ${start + 1}–${Math.min(start + PAGE_SIZE, rows.length)} из ${rows.length}</span><button class="secondary" type="button" data-editor-action="next" ${page === pages - 1 ? 'disabled' : ''}>Далее →</button>` : '';
     root.querySelector('[data-editor-action="add"]').disabled = rows.length >= CARD_LIMIT;
@@ -68,11 +58,26 @@ export function mountDeckEditor(root, originalCards = [], { esc, icon, countLabe
   }
 
   const input = event => {
-    const field = event.target.closest('[data-card-field]');
-    if (!field || !root.contains(field)) return;
+    const field = event.target.closest('[data-card-field], [data-meta-field]');
+    if (!field || !root.contains(field)) { if (event.target.id === `${prefix}-bulk`) preview(); onChange(); return; }
     const index = Number(field.closest('[data-row-index]').dataset.rowIndex);
-    if (rows[index]) rows[index][Number(field.dataset.cardField)] = field.value;
+    if (rows[index]) { if (field.dataset.metaField) rows[index][2][field.dataset.metaField] = field.value; else rows[index][Number(field.dataset.cardField)] = field.value; }
+    onChange();
   };
+  function bulkCards() {
+    const separator = root.querySelector(`#${prefix}-separator`).value;
+    return parseCardText(root.querySelector(`#${prefix}-bulk`).value, { separator: separator === 'tab' ? '\t' : separator, boundary: root.querySelector(`#${prefix}-boundary`).value });
+  }
+  function preview() {
+    const error = root.querySelector('.deck-bulk-error'), target = root.querySelector('.bulk-preview');
+    error.textContent = ''; target.innerHTML = '';
+    if (!root.querySelector(`#${prefix}-bulk`).value.trim()) return;
+    try {
+      const cards = bulkCards(), duplicates = duplicateCards(cards, rows).length;
+      target.innerHTML = `<p>${countLabel(cards.length, ['карточка', 'карточки', 'карточек'])}${duplicates ? ` · повторяющихся терминов: ${duplicates}` : ''}</p><div class="terms">${cards.slice(0, 10).map(card => `<div><b>${esc(card[0])}</b><span>${esc(card[1])}</span></div>`).join('')}</div>${cards.length > 10 ? '<p>Показаны первые 10 карточек.</p>' : ''}`;
+    } catch (failure) { error.textContent = failure.message; }
+  }
+  const change = () => { preview(); onChange(); };
   const click = event => {
     const button = event.target.closest('button[data-editor-action]');
     if (!button || !root.contains(button) || button.disabled) return;
@@ -94,7 +99,13 @@ export function mountDeckEditor(root, originalCards = [], { esc, icon, countLabe
     } else if (action === 'append') {
       const error = root.querySelector('.deck-bulk-error'); error.textContent = '';
       try {
-        const additions = parseBulkCards(root.querySelector(`#${prefix}-bulk`).value);
+        let additions = bulkCards();
+        const duplicates = duplicateCards(additions, rows).length;
+        if (root.querySelector(`#${prefix}-duplicates`).value === 'skip') {
+          const seen = new Set(rows.map(duplicateKey).filter(Boolean));
+          additions = additions.filter(card => { const key = duplicateKey(card); if (seen.has(key)) return false; seen.add(key); return true; });
+        }
+        if (!additions.length) throw new Error('Все термины уже есть в наборе. Дубликаты не добавлены.');
         // The untouched initial row is just a placeholder, not an existing card.
         const placeholder = !original.length && rows.length === 1 && !rows[0][0].trim() && !rows[0][1].trim();
         if ((placeholder ? 0 : rows.length) + additions.length > CARD_LIMIT) throw new Error('В одном наборе можно сохранить не больше 100 000 карточек.');
@@ -102,14 +113,20 @@ export function mountDeckEditor(root, originalCards = [], { esc, icon, countLabe
         const first = rows.length;
         for (const card of additions) rows.push(copy(card));
         root.querySelector(`#${prefix}-bulk`).value = '';
-        focusCard(first); status.textContent = `Добавлено: ${countLabel(additions.length, ['карточка', 'карточки', 'карточек'])}.`;
+        focusCard(first); preview(); status.textContent = `Добавлено: ${countLabel(additions.length, ['карточка', 'карточки', 'карточек'])}.${duplicates ? ` Найдено дубликатов: ${duplicates}; применён выбранный способ обработки.` : ''}`;
       } catch (failure) { error.textContent = failure.message; }
     }
+    if (!['previous', 'next'].includes(action)) onChange();
   };
   root.addEventListener('input', input);
   root.addEventListener('click', click);
+  root.addEventListener('change', change);
   renderRows();
   return {
+    isDirty() { return JSON.stringify(rows) !== initialRows || Boolean(root.querySelector(`#${prefix}-bulk`).value.trim()); },
+    getDraftCards() { return rows; },
+    getBulkText() { return root.querySelector(`#${prefix}-bulk`).value; },
+    setBulkText(text) { root.querySelector(`#${prefix}-bulk`).value = text || ''; preview(); },
     getCards() {
       const cards = rows.map(card => [card[0].trim(), card[1].trim(), structuredClone(card[2])]);
       const invalid = cards.findIndex(card => !card[0] || !card[1]);
@@ -124,6 +141,6 @@ export function mountDeckEditor(root, originalCards = [], { esc, icon, countLabe
       return original.filter(card => !remaining.has(String(card[2]?.id || '')));
     },
     focusCard,
-    destroy() { root.removeEventListener('input', input); root.removeEventListener('click', click); },
+    destroy() { root.removeEventListener('input', input); root.removeEventListener('click', click); root.removeEventListener('change', change); },
   };
 }

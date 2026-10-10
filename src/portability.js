@@ -62,6 +62,15 @@ function validateData(data) {
   if (data.settings?.goal !== undefined && (!Number.isInteger(data.settings.goal) || data.settings.goal < 1 || data.settings.goal > 500)) fail('Некорректная дневная цель.');
   if (data.categories !== undefined && (!Array.isArray(data.categories) || data.categories.some(value => typeof value !== 'string'))) fail('Некорректный список категорий.');
   if (data.days !== undefined && (!Array.isArray(data.days) || data.days.some(value => typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)))) fail('Некорректный календарь занятий.');
+  if (data.newCardDay !== undefined && (!plain(data.newCardDay) || !/^\d{4}-\d{2}-\d{2}$/.test(data.newCardDay.day) || !Array.isArray(data.newCardDay.ids) || data.newCardDay.ids.some(id => !identifier(id)))) fail('Некорректный дневной список новых карточек.');
+  if (data.editorDraft !== undefined && (!plain(data.editorDraft) || !Array.isArray(data.editorDraft.cards) || data.editorDraft.cards.some(card => !Array.isArray(card) || typeof card[0] !== 'string' || typeof card[1] !== 'string'))) fail('Некорректный черновик редактора.');
+  if (data.deletedSets !== undefined) {
+    if (!Array.isArray(data.deletedSets)) fail('Некорректная корзина удалённых наборов.');
+    for (const entry of data.deletedSets) {
+      if (!plain(entry) || !identifier(entry.key) || !Number.isFinite(entry.expiresAt) || !Number.isInteger(entry.index) || entry.index < 0) fail('Некорректный удалённый набор.');
+      validateData({ sets: [entry.set], reviews: entry.reviews, cardStats: entry.cardStats });
+    }
+  }
   return cards;
 }
 
@@ -236,30 +245,34 @@ export async function discardStaged(value) {
   staged.delete(value);
 }
 
-function csvRows(text, separator) {
+export function csvRows(text, separator) {
   const rows = [];
-  let row = [], field = '', quoted = false, afterQuote = false;
+  let row = [], field = '', quoted = false, afterQuote = false, line = 1, startLine = 1;
+  const addRow = () => { Object.defineProperty(row, 'sourceLine', { value: startLine }); if (row.some(value => value.trim())) rows.push(row); };
   for (let i = 0; i < text.length; i++) {
     const char = text[i];
     if (quoted) {
       if (char === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else { quoted = false; afterQuote = true; } }
-      else field += char;
-    } else if (char === '"' && !field) { quoted = true; afterQuote = false; }
+      else { field += char; if (char === '\n' || char === '\r' && text[i + 1] !== '\n') line++; }
+    } else if (char === '"' && !field.trim()) { field = ''; quoted = true; afterQuote = false; }
     else if (char === separator) { row.push(field); field = ''; afterQuote = false; }
     else if (char === '\n' || char === '\r') {
       if (char === '\r' && text[i + 1] === '\n') i++;
-      row.push(field); if (row.some(value => value.trim())) rows.push(row);
+      row.push(field); addRow(); line++; startLine = line;
       row = []; field = ''; afterQuote = false;
     } else if (afterQuote && char.trim()) fail('После закрывающей кавычки в CSV должен быть разделитель или новая строка.');
     else field += char;
   }
   if (quoted) fail('В CSV не закрыта кавычка. Проверь строку перед импортом.');
-  row.push(field); if (row.some(value => value.trim())) rows.push(row);
+  row.push(field); addRow();
   return rows;
 }
-function separatorFor(text, directive) {
+export function separatorFor(text, directive) {
   const named = { tab: '\t', comma: ',', semicolon: ';', pipe: '|', space: ' ', colon: ':' };
   if (directive && (named[directive.toLowerCase()] || directive.length === 1)) return named[directive.toLowerCase()] || directive;
+  let tabs = [];
+  try { tabs = csvRows(text, '\t'); } catch { /* A quoted CSV may use another delimiter. */ }
+  if (tabs.length && tabs.every(row => row.length >= 2)) return '\t';
   let winner = ',', score = 0;
   for (const separator of ['\t', ';', ',']) {
     let rows;
@@ -286,10 +299,13 @@ function plainText(html) {
 }
 const filenameTitle = name => String(name || 'Импортированный набор').replace(/\.(csv|tsv|txt|apkg|colpkg)$/i, '').trim() || 'Импортированный набор';
 const normalizedHeader = value => String(value).trim().toLowerCase().replace(/[\s_-]/g, '');
-const HEADER_ALIASES = {
+export const HEADER_ALIASES = {
   term: ['term', 'word', 'front', 'question', 'термин', 'слово', 'вопрос'],
   definition: ['definition', 'meaning', 'translation', 'back', 'answer', 'значение', 'определение', 'перевод', 'ответ'],
   example: ['example', 'sentence', 'пример', 'предложение'],
+  film: ['film', 'movie', 'фильм', 'сериал'],
+  episode: ['episode', 'серия', 'сезонсерия'],
+  timecode: ['timecode', 'таймкод'],
   category: ['category', 'категория'],
   deck: ['deck', 'set', 'title', 'набор', 'колода', 'название'],
 };
@@ -334,7 +350,9 @@ function textImport(text, name) {
     const key = `${title}\0${category}`;
     if (!groups.has(key)) groups.set(key, { title, desc: `Импорт из ${name || 'файла'}`, category, symbol: 'letters', cards: [] });
     const example = indices.example >= 0 ? clean(row[indices.example]) : '';
-    groups.get(key).cards.push([term, definition, example ? { example } : {}]);
+    const metadata = example ? { example } : {};
+    for (const field of ['film', 'episode', 'timecode']) { const value = indices[field] >= 0 ? clean(row[indices[field]]) : ''; if (value) metadata[field] = value; }
+    groups.get(key).cards.push([term, definition, metadata]);
   }
   const sets = [...groups.values()];
   if (!sets.length) fail('Нужны хотя бы две заполненные колонки: термин и значение.');
@@ -352,6 +370,15 @@ export function exportCSV(data) {
     rows.push([card[0], card[1], card[2]?.example || '', set.category || '', set.title]);
   }
   return new Blob(['\uFEFF' + rows.map(row => row.map(quote).join(',')).join('\r\n') + '\r\n'], { type: 'text/csv;charset=utf-8' });
+}
+
+/** Anki's text importer accepts tab columns, HTML fields, deck and tags. */
+export function exportAnki(data) {
+  validateData(data);
+  const escape = value => String(value || '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char])).replace(/\r?\n/g, '<br>').replace(/\t/g, '&#9;');
+  const header = '#separator:tab\n#html:true\n#columns:Front\tBack\tExample\tMovie\tEpisode\tTimecode\tDeck\tTags\n#deckcolumn:7\n#tagscolumn:8\n';
+  const rows = data.sets.flatMap(set => set.cards.map(card => [card[0], card[1], card[2]?.example, card[2]?.film, card[2]?.episode, card[2]?.timecode, set.title, card[2]?.starred ? 'zhekandus_hard' : ''].map(escape).join('\t')));
+  return new Blob([header + rows.join('\n') + '\n'], { type: 'text/plain;charset=utf-8' });
 }
 
 export async function parseImport(file) {

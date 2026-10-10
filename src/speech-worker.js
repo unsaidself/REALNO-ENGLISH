@@ -13,7 +13,7 @@ function utf8Text(text) {
 
 async function synthesize({ id, text, lang, rate }) {
   try {
-    const voice = String(lang).toLowerCase().startsWith('ru') ? 'ru' : 'en/en-us';
+    const voice = String(lang).toLowerCase().startsWith('ru') ? 'ru' : String(lang).toLowerCase() === 'en-gb' ? 'en/en' : 'en/en-us';
     const numericRate = Number(rate);
     const speed = Number.isFinite(numericRate) ? Math.max(0.5, Math.min(1.5, numericRate)) : 0.9;
     // generateSpeech creates a fresh CLI/FS instance for each request.

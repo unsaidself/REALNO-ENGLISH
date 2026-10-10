@@ -1,0 +1,14 @@
+import { readFile, readdir, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+const root = new URL('../dist/', import.meta.url);
+const assets = await readdir(new URL('assets/', root));
+const files = ['./', './index.html', './manifest.webmanifest', './icon.svg', './icon-192.png', './icon-512.png', ...assets.map(name => './assets/' + name)];
+const version = createHash('sha256').update(await readFile(new URL('index.html',root))).update(assets.join('|')).update('static-cache-v2').digest('hex').slice(0,16);
+const worker = `const CACHE='zhekandus-${version}';const FILES=${JSON.stringify(files)};
+self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(FILES))));
+self.addEventListener('activate',event=>event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(key=>key.startsWith('zhekandus-')&&key!==CACHE).map(key=>caches.delete(key)))).then(()=>self.clients.claim())));
+self.addEventListener('message',event=>{if(event.data==='activate-update')self.skipWaiting();});
+self.addEventListener('fetch',event=>{const url=new URL(event.request.url);if(event.request.method!=='GET'||url.origin!==self.location.origin)return;if(event.request.mode==='navigate'){event.respondWith(caches.open(CACHE).then(async cache=>(await cache.match('./index.html',{ignoreVary:true}))||fetch(event.request)));return;}event.respondWith(caches.open(CACHE).then(async cache=>(await cache.match(event.request,{ignoreVary:true}))||fetch(event.request)));});
+`;
+await writeFile(new URL('sw.js',root), worker);
+console.log(`PWA cache: ${files.length} local resources, version ${version}`);

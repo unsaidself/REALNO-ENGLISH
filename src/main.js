@@ -1,4 +1,9 @@
-import { ensurePracticeData, localDay, getDueCards, scheduleReview, recordDaily, dailyProgress, activityCalendar, studyStreak, reclassifyAnswer, recordCardAnswer, getWeakCards, learnedCardCount } from './practice.js';
+import { createAutoBackup } from './auto-backup.js';
+import { startPWA, installApplication } from './pwa.js';
+import { limitedNewCards, introduceCard } from './learning-plan.js';
+import { protectModal } from './modal-guard.js';
+import { duplicateCards } from './card-text.js';
+import { ensurePracticeData, localDay, getDueCards as scheduledDueCards, scheduleReview, recordDaily, dailyProgress, activityCalendar, studyStreak, reclassifyAnswer, recordCardAnswer, getWeakCards, learnedCardCount } from './practice.js';
 import { unlockAudio, playSound, speakText, stopAudio, storeAttachment, removeAttachment, attachmentMarkup, hydrateAttachments, releaseMediaUrls } from './media.js';
 import { mountMatching } from './matching.js';
 import { buildCloze, buildListening, evaluateCloze, evaluateListening, answerVariants, normalizeTypedAnswer, matchesTypedAnswer } from './exercises.js';
@@ -42,6 +47,7 @@ Object.assign(icons, {
   download: '<path d="M12 3v12m-5-5 5 5 5-5M4 17v4h16v-4"/>',
   import: '<path d="M14 3h6v18H4v-6M3 8h11m-4-4 4 4-4 4"/>',
   lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V6a4 4 0 0 1 8 0v4M12 14v3"/>',
+  star: '<path d="m12 2 3 6 7 1-5 5 1 7-6-3-6 3 1-7-5-5 7-1z"/>',
   mic: '<rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/>',
 });
 const icon = (name) => `<svg class="icon icon-${name}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || icons.book}</svg>`;
@@ -83,7 +89,11 @@ function prepareData(value) {
   return value;
 }
 prepareData(data);
+const autoBackup = createAutoBackup({ getData: () => data, onWritten: timestamp => { data.lastBackupAt = timestamp; stateStore.save(data); }, onChange: () => updateAutoBackupUI() });
+void autoBackup.initialize();
+let movieFilter = '';
 let page = 'home', filter = null, query = '', session = null, direction = 'normal';
+let modalExitGuard = null, editorDirty = () => false;
 let toastTimer, matchController, pronunciationController, deckEditorController, modalReturnFocus = null, speechUIRequest = 0;
 let calendarMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -96,12 +106,12 @@ const shuffle = items => {
 const word = (n, forms) => forms[n % 100 >= 11 && n % 100 <= 14 ? 2 : n % 10 === 1 ? 0 : n % 10 >= 2 && n % 10 <= 4 ? 1 : 2];
 const countLabel = (n, forms) => `${n} ${word(n, forms)}`;
 const sound = kind => playSound(kind, data.settings.sounds);
-function save() { return stateStore.save(data); }
+function save() { autoBackup.request(); return stateStore.save(data); }
 async function saveNow() { await stateStore.commit(data); return true; }
 async function commitReplacement(next) {
   try { await stateStore.commit(next); }
   catch (error) { stateStore.save(data); throw error; }
-  data = next;
+  data = next; autoBackup.request();
 }
 function updateStorageStatus() {
   const notice = document.querySelector('#storage-state');
@@ -120,7 +130,7 @@ function notify(message) {
   toast.innerHTML = `${icon('check')}<span>${esc(message)}</span>`; document.body.append(toast);
   toastTimer = setTimeout(() => toast.remove(), 3500);
 }
-function cleanupSession() { deckEditorController?.destroy(); deckEditorController = null; matchController?.destroy(); matchController = null; pronunciationController?.destroy(); pronunciationController = null; stopAudio(); releaseMediaUrls(); }
+function cleanupSession() { modalExitGuard = null; editorDirty = () => false; deckEditorController?.destroy(); deckEditorController = null; matchController?.destroy(); matchController = null; pronunciationController?.destroy(); pronunciationController = null; stopAudio(); releaseMediaUrls(); }
 function applyTheme(settings = data.settings) {
   const theme = settings.theme === 'system' ? (window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : settings.theme;
   document.documentElement.dataset.theme = theme;
@@ -139,6 +149,10 @@ function rememberStudy(set, card = null) {
   const realSet = set.id === null && card ? data.sets.find(item => item.cards.some(entry => entry[2].id === card[2].id)) : findSet(set.id);
   if (realSet && data.lastStudySetId !== realSet.id) { data.lastStudySetId = realSet.id; save(); }
 }
+function getDueCards(value, setId = null) {
+  const entries = scheduledDueCards(value, setId), eligible = new Set(limitedNewCards(value, entries.map(entry => entry.card)).map(card => card[2].id));
+  return entries.filter(entry => eligible.has(entry.card[2].id));
+}
 function resumeStudy() { if (getDueCards(data).length) startReview(); else { const set = lastStudySet(); set ? openSet(set.id) : editor(); } }
 function render() {
   cleanupSession(); session = null;
@@ -150,19 +164,19 @@ function render() {
   const title = titles[page];
   document.querySelector('#app').innerHTML = `
     <aside><a class="logo" href="#" aria-label="zhekandus, главная">zhekandus</a><div class="workspace">Твоё обучение</div>
-      <nav>${[['home', 'Главная', 'home'], ['sets', 'Мои наборы', 'layers'], ['stats', 'Прогресс', 'chart'], ['ranks', 'Ранги', 'trophy'], ['storage', 'Копии и импорт', 'archive'], ['settings', 'Настройки', 'settings']].map(([p, label, glyph]) => `<button class="nav ${page === p ? 'active' : ''}" data-page="${p}" aria-label="${label}" title="${label}" ${page === p ? 'aria-current="page"' : ''}>${icon(glyph)}${label}${p === 'sets' ? `<small>${data.sets.length}</small>` : ''}</button>`).join('')}</nav>
+      <nav>${[['home', 'Главная', 'home'], ['sets', 'Мои наборы', 'layers'], ['stats', 'Прогресс', 'chart'], ['ranks', 'Ранги', 'trophy'], ['storage', 'Копии и импорт', 'archive'], ['settings', 'Настройки', 'settings']].map(([p, label, glyph]) => `<button class="nav ${page === p ? 'active' : ''}" data-page="${p}" aria-label="${label}" title="${label}" ${page === p ? 'aria-current="page"' : ''}>${icon(glyph)}<span class="nav-label">${label}</span><span class="nav-label-mobile" aria-hidden="true">${({home:'Домой',sets:'Наборы',stats:'Рост',ranks:'Ранги',storage:'Копии',settings:'Опции'})[p]}</span>${p === 'sets' ? `<small>${data.sets.length}</small>` : ''}</button>`).join('')}</nav>
       <div class="side-note"><b>Свой ритм, своя цель</b><p>${countLabel(data.settings.goal, ['ответ', 'ответа', 'ответов'])} в день. Сложные карточки вернутся раньше, знакомые — позже.</p><button class="text-button" id="sidebar-review">Повторить сегодня ${icon('arrow')}</button></div>
       <div class="profile"><div class="avatar">${esc(avatar)}</div><div><b>${esc(username)}</b><small>Моя коллекция</small></div></div></aside>
-    <main><header><div class="breadcrumb">zhekandus <span>/</span> ${page === 'home' ? 'Главная' : titles[page]}</div><div class="header-right"><button class="icon-button ${data.settings.sounds ? 'is-on' : ''}" id="sound-toggle" aria-pressed="${data.settings.sounds}" title="${data.settings.sounds ? 'Выключить' : 'Включить'} звуки" aria-label="${data.settings.sounds ? 'Выключить' : 'Включить'} звуки">${icon(data.settings.sounds ? 'sound' : 'mute')}</button><button class="icon-button" id="settings" aria-label="Открыть настройки" title="Тема и настройки">${icon('settings')}</button><div class="avatar small" title="${esc(username)}">${esc(avatar)}</div></div></header>
+    <main><header><div class="breadcrumb">zhekandus <span>/</span> ${page === 'home' ? 'Главная' : titles[page]}</div><div class="header-right"><button class="icon-button quick-add" id="quick-add" aria-label="Быстро добавить карточку" title="Добавить карточку">${icon('plus')}</button><button class="icon-button ${data.settings.sounds ? 'is-on' : ''}" id="sound-toggle" aria-pressed="${data.settings.sounds}" title="${data.settings.sounds ? 'Выключить' : 'Включить'} звуки" aria-label="${data.settings.sounds ? 'Выключить' : 'Включить'} звуки">${icon(data.settings.sounds ? 'sound' : 'mute')}</button><button class="icon-button" id="settings" aria-label="Открыть настройки" title="Тема и настройки">${icon('settings')}</button><div class="avatar small" title="${esc(username)}">${esc(avatar)}</div></div></header>
       <div class="content"><div class="welcome"><div><h1>${title}</h1><p>${descriptions[page]}</p></div>${['home', 'sets'].includes(page) ? `<button class="primary" id="create">${icon('plus')} Создать набор</button>` : ''}</div><section id="storage-state" class="storage-state" role="alert" hidden><p></p><button class="secondary" id="retry-storage">Повторить сохранение</button><button class="text-button" id="storage-backup">Сделать резервную копию</button></section>
-      ${page === 'settings' ? settingsPage() : page === 'ranks' ? ranksPage(data, icon, esc) : page === 'storage' ? storagePage(icon, data) : page === 'stats' ? statsCards() + calendarPanel() + statsPanel() : `${page === 'home' ? hero() + backupReminder() + dashboard() + statsCards() : ''}<section class="collection"><div class="section-heading"><h2>Твои наборы <span>${data.sets.length}</span></h2><label class="search" for="search">${icon('search')}<input id="search" aria-label="Найти набор" placeholder="Найти набор…" value="${esc(query)}"></label></div><div class="tabs" aria-label="Категории"><button data-filter="*" data-all="true" class="${filter === null ? 'selected' : ''}">Все наборы</button>${data.categories.map(c => `<button data-filter="${esc(c)}" class="${c === filter ? 'selected' : ''}">${esc(c)}</button>`).join('')}</div><div class="grid" id="sets-grid">${setCards()}</div></section>`}</div>
+      ${page === 'settings' ? settingsPage() : page === 'ranks' ? ranksPage(data, icon, esc) : page === 'storage' ? storagePage(icon, data) : page === 'stats' ? statsCards() + calendarPanel() + statsPanel() : `${['home','sets'].includes(page) ? trashReminder() : ''}${page === 'home' ? draftReminder() + hero() + backupReminder() + dashboard() + statsCards() : ''}<section class="collection"><div class="section-heading"><h2>Твои наборы <span>${data.sets.length}</span></h2><label class="search" for="search">${icon('search')}<input id="search" aria-label="Найти набор" placeholder="Найти набор…" value="${esc(query)}"></label></div><div class="tabs" aria-label="Категории"><button data-filter="*" data-all="true" class="${filter === null ? 'selected' : ''}">Все наборы</button>${data.categories.map(c => `<button data-filter="${esc(c)}" class="${c === filter ? 'selected' : ''}">${esc(c)}</button>`).join('')}</div><label class="film-filter" for="film-filter">Фильм / сериал<select id="film-filter"><option value="">Все источники</option>${[...new Set(data.sets.flatMap(set => set.cards.map(card => card[2]?.film).filter(Boolean)))].map(film => `<option value="${esc(film)}" ${film === movieFilter ? 'selected' : ''}>${esc(film)}</option>`).join('')}</select></label><div class="grid" id="sets-grid">${setCards()}</div></section>`}</div>
     </main><div id="modal-root"></div>`;
   bind();
-  updateStorageStatus();
+  updateStorageStatus(); updateAutoBackupUI();
 }
 function hero() {
   const set = lastStudySet(), due = getDueCards(data);
-  if (!set) return `<section class="continue-panel empty-collection"><span class="panel-label">Твоя коллекция</span><h2>Начни с первого набора</h2><p>Добавь слова, выражения или факты, которые хочешь запомнить.</p><div class="study-actions"><button class="primary" id="quick">${icon('plus')} Создать набор</button><button class="secondary" id="empty-import">${icon('import')} Импорт</button></div></section>`;
+  if (!set) return `<section class="continue-panel empty-collection"><span class="panel-label">Твоя коллекция</span><h2>Начни с первого набора</h2><p>Добавь слова, выражения или факты, которые хочешь запомнить.</p><div class="study-actions"><button class="secondary" id="empty-import">${icon('import')} Импорт</button></div></section>`;
   return `<section class="continue-panel"><div><span class="panel-label">Продолжить</span><h2>${esc(set.title)}</h2><p>${countLabel(due.length, ['карточка', 'карточки', 'карточек'])} на сегодня · ${countLabel(set.cards.length, ['карточка', 'карточки', 'карточек'])} в последнем наборе</p></div><button class="primary" id="quick">${due.length ? 'Повторить сегодня' : 'Продолжить'} ${icon('arrow')}</button></section>`;
 }
 function backupReminder() {
@@ -190,19 +204,22 @@ function calendarPanel() {
 }
 function settingsPage() {
   const prefs = data.settings;
-  return `<section class="settings-panel"><div class="setting-group"><h2>Профиль</h2><label for="profile-name">Имя</label><input id="profile-name" name="name" type="text" maxlength="40" value="${esc(prefs.name || 'Ученик')}" placeholder="Ученик" autocomplete="nickname"></div><div class="setting-group"><h2>${icon('moon')} Тема</h2><p>Светлая, тёмная или как на устройстве.</p><div class="theme-options">${[['light', 'Светлая', 'sun'], ['dark', 'Тёмная', 'moon'], ['system', 'Системная', 'settings']].map(([value, label, glyph]) => `<button class="secondary ${prefs.theme === value ? 'selected' : ''}" data-theme-choice="${value}" aria-pressed="${prefs.theme === value}">${icon(glyph)}${label}</button>`).join('')}</div></div><div class="setting-group"><h2>Акцентный цвет</h2><div class="accent-options">${[['teal', 'Зелёный'], ['blue', 'Синий'], ['orange', 'Терракота'], ['rose', 'Розовый'], ['graphite', 'Графит']].map(([value, label]) => `<button class="accent-swatch ${prefs.accent === value ? 'selected' : ''}" data-accent-choice="${value}" aria-label="${label}" aria-pressed="${prefs.accent === value}"><span></span>${label}</button>`).join('')}</div></div><div class="setting-group"><h2>${icon('target')} Ежедневная цель</h2><label class="goal-label" for="daily-goal">Ответов в день</label><input id="daily-goal" type="number" min="1" max="500" step="1" value="${prefs.goal}"><p>Считаются ответы в карточках, тестах, запоминании и игре.</p></div><div class="setting-row"><div><h2>${icon('sound')} Звуки</h2><p>Ответы, переворот карточек, совпадения и серии.</p></div><label class="toggle" for="setting-sounds"><input type="checkbox" id="setting-sounds" aria-label="Звуковые эффекты" ${prefs.sounds ? 'checked' : ''}><span></span><b>${prefs.sounds ? 'Включены' : 'Выключены'}</b></label></div><div class="setting-group speech-settings"><h2>${icon('sound')} Озвучка слов</h2><label for="speech-voice">Голосовой движок</label><select id="speech-voice"><option value="auto" ${(prefs.speechVoice || 'auto') === 'auto' ? 'selected' : ''}>Автоматически — голос устройства и локальный запасной</option><option value="offline" ${prefs.speechVoice === 'offline' ? 'selected' : ''}>Встроенный локальный голос</option></select><label for="speech-rate">Скорость <b id="speech-rate-label">${prefs.speechRate || .9}×</b></label><input type="range" id="speech-rate" min="0.5" max="1.5" step="0.1" value="${prefs.speechRate || .9}"><p>Английский и русский работают без скачивания системных голосов. Встроенный голос звучит более механически.</p><button class="secondary" id="speech-demo">${icon('sound')} Проверить озвучку</button></div><div id="settings-error" class="form-error" role="alert"></div><p class="settings-autosave">Изменения сохраняются автоматически.</p><section class="danger-zone"><h2>Сброс обучения</h2><p>Начни заново: статистика, расписание повторений и опыт рангов будут обнулены.</p><button class="secondary danger-text" id="reset-all-progress">Сбросить весь прогресс</button></section></section>`;
+  return `<section class="settings-panel"><div class="setting-group"><h2>Профиль</h2><label for="profile-name">Имя</label><input id="profile-name" name="name" type="text" maxlength="40" value="${esc(prefs.name || 'Ученик')}" placeholder="Ученик" autocomplete="nickname"></div><div class="setting-group"><h2>${icon('moon')} Тема</h2><p>Светлая, тёмная или как на устройстве.</p><div class="theme-options">${[['light', 'Светлая', 'sun'], ['dark', 'Тёмная', 'moon'], ['system', 'Системная', 'settings']].map(([value, label, glyph]) => `<button class="secondary ${prefs.theme === value ? 'selected' : ''}" data-theme-choice="${value}" aria-pressed="${prefs.theme === value}">${icon(glyph)}${label}</button>`).join('')}</div></div><div class="setting-group"><h2>Акцентный цвет</h2><div class="accent-options">${[['teal', 'Зелёный'], ['blue', 'Синий'], ['orange', 'Терракота'], ['rose', 'Розовый'], ['graphite', 'Графит']].map(([value, label]) => `<button class="accent-swatch ${prefs.accent === value ? 'selected' : ''}" data-accent-choice="${value}" aria-label="${label}" aria-pressed="${prefs.accent === value}"><span></span>${label}</button>`).join('')}</div></div><div class="setting-group"><h2>${icon('target')} Ежедневная цель</h2><label class="goal-label" for="daily-goal">Ответов в день</label><input id="daily-goal" type="number" min="1" max="500" step="1" value="${prefs.goal}"><p>Считаются ответы в карточках, тестах, запоминании и игре.</p></div><div class="setting-row"><div><h2>${icon('sound')} Звуки</h2><p>Ответы, переворот карточек, совпадения и серии.</p></div><label class="toggle" for="setting-sounds"><input type="checkbox" id="setting-sounds" aria-label="Звуковые эффекты" ${prefs.sounds ? 'checked' : ''}><span></span><b>${prefs.sounds ? 'Включены' : 'Выключены'}</b></label></div><div class="setting-group"><h2>Ритм обучения</h2><label for="daily-new-limit">Новых карточек в день</label><input id="daily-new-limit" type="number" min="0" max="500" value="${Number.isInteger(prefs.newCardsPerDay) ? prefs.newCardsPerDay : 20}"><p>Знакомые карточки продолжают повторяться. 0 — только знакомые.</p><label for="reminder-time">Время напоминания</label><input type="time" id="reminder-time" value="${esc(prefs.reminderTime || '19:00')}"><button class="secondary" id="enable-reminders">${prefs.remindersOn ? 'Выключить напоминания' : 'Включить напоминания'}</button><p id="reminder-status" role="status">Напоминание работает, пока приложение открыто; закрытый браузер не поддерживает гарантированное офлайн-расписание.</p><button class="secondary" id="install-app">Установить на телефон</button><p id="install-status" role="status"></p></div><div class="setting-group speech-settings"><h2>${icon('sound')} Озвучка слов</h2><label for="speech-voice">Голосовой движок</label><select id="speech-voice"><option value="auto" ${(prefs.speechVoice || 'auto') === 'auto' ? 'selected' : ''}>Автоматически — голос устройства и локальный запасной</option><option value="offline" ${prefs.speechVoice === 'offline' ? 'selected' : ''}>Встроенный локальный голос</option></select><label for="speech-accent">Английский акцент</label><select id="speech-accent"><option value="en-US" ${prefs.speechAccent !== 'en-GB' ? 'selected' : ''}>Американский (US)</option><option value="en-GB" ${prefs.speechAccent === 'en-GB' ? 'selected' : ''}>Британский (UK)</option></select><label for="speech-rate">Скорость <b id="speech-rate-label">${prefs.speechRate || .9}×</b></label><input type="range" id="speech-rate" min="0.5" max="1.5" step="0.1" value="${prefs.speechRate || .9}"><p>Английский и русский работают без скачивания системных голосов. Встроенный голос звучит более механически.</p><button class="secondary" id="speech-demo">${icon('sound')} Проверить озвучку</button></div><div id="settings-error" class="form-error" role="alert"></div><p class="settings-autosave">Изменения сохраняются автоматически.</p><section class="danger-zone"><h2>Сброс обучения</h2><p>Начни заново: статистика, расписание повторений и опыт рангов будут обнулены.</p><button class="secondary danger-text" id="reset-all-progress">Сбросить весь прогресс</button></section></section>`;
 }
 function setCards() {
   const needle = normalize(query);
-  const sets = data.sets.filter(s => (filter === null || s.category === filter) && (normalize(`${s.title} ${s.desc}`).includes(needle) || s.cards.some(card => normalize(`${card[0]} ${card[1]}`).includes(needle))));
-  return `${!sets.length ? data.sets.length ? '<div class="empty-state"><b>Ничего не найдено</b><p>Измени поиск или создай новый набор.</p></div>' : '<div class="empty-state"><b>Здесь появятся твои наборы</b><p>Создай набор или перенеси карточки через импорт.</p><button class="secondary" id="empty-grid-import">Импорт</button></div>' : ''}${sets.map(s => `<article class="set-card" data-set="${esc(s.id)}" tabindex="0" aria-label="Открыть ${esc(s.title)}"><div class="set-top">${visual(s)}<span class="category">${esc(s.category)}</span><button class="more" data-edit="${esc(s.id)}" aria-label="Редактировать набор">${icon('pencil')}</button></div><h3>${esc(s.title)}</h3><p>${esc(s.desc)}</p><div class="set-footer"><span>${icon('layers')} ${countLabel(s.cards.length, ['карточка', 'карточки', 'карточек'])}</span><span class="open-arrow">${icon('arrow')}</span></div></article>`).join('')}<button class="new-set" id="create-card"><span>${icon('plus')}</span><b>Новый набор</b><p>Слова, факты и свои категории</p></button>`;
+  const sets = data.sets.filter(s => (filter === null || s.category === filter) && (!movieFilter || s.cards.some(card => card[2]?.film === movieFilter)) && (normalize(`${s.title} ${s.desc}`).includes(needle) || s.cards.some(card => normalize(`${card[0]} ${card[1]}`).includes(needle))));
+  return `${!sets.length ? data.sets.length ? '<div class="empty-state"><b>Ничего не найдено</b><p>Измени поиск или создай новый набор.</p></div>' : '<div class="empty-state"><b>Здесь появятся твои наборы</b><p>Создай набор или перенеси карточки через импорт.</p><button class="secondary" id="empty-grid-import">Импорт</button></div>' : ''}${sets.map(s => `<article class="set-card" data-set="${esc(s.id)}" tabindex="0" aria-label="Открыть ${esc(s.title)}"><div class="set-top">${visual(s)}<span class="category">${esc(s.category)}</span><button class="more" data-edit="${esc(s.id)}" aria-label="Редактировать набор">${icon('pencil')}</button></div><h3>${esc(s.title)}</h3><p>${esc(s.desc)}</p><div class="set-footer"><span>${icon('layers')} ${countLabel(s.cards.length, ['карточка', 'карточки', 'карточек'])}</span><span class="open-arrow">${icon('arrow')}</span></div></article>`).join('')}`;
 }
 function bind() {
   document.querySelector('#retry-storage').onclick = async () => { try { await saveNow(); } catch {} };
   document.querySelector('#storage-backup').onclick = () => goPage('storage');
+  document.querySelector('#restore-quick-draft')?.addEventListener('click', () => quickCard({ resumeDraft: true }));
+  document.querySelector('#restore-draft')?.addEventListener('click', () => editor(findSet(data.editorDraft?.setId), true));
   document.querySelector('#backup-reminder-open')?.addEventListener('click', () => goPage('storage'));
   document.querySelector('.logo').onclick = e => { e.preventDefault(); goPage('home'); };
   document.querySelectorAll('[data-page]').forEach(button => button.onclick = () => goPage(button.dataset.page));
+  document.querySelector('#quick-add').onclick = () => quickCard();
   document.querySelector('#settings').onclick = () => goPage('settings');
   document.querySelector('#sound-toggle').onclick = () => {
     data.settings.sounds = !data.settings.sounds;
@@ -210,6 +227,7 @@ function bind() {
     save(); render(); notify(`Звуки ${data.settings.sounds ? 'включены' : 'выключены'}`);
   };
   document.querySelectorAll('[data-filter]').forEach(button => button.onclick = () => { filter = button.hasAttribute('data-all') ? null : button.dataset.filter; render(); });
+  document.querySelector('#film-filter')?.addEventListener('change', e => { movieFilter = e.target.value; document.querySelector('#sets-grid').innerHTML = setCards(); bindSets(); });
   document.querySelector('#search')?.addEventListener('input', e => { query = e.target.value; document.querySelector('#sets-grid').innerHTML = setCards(); bindSets(); });
   document.querySelector('#create')?.addEventListener('click', () => editor());
   document.querySelector('#quick')?.addEventListener('click', resumeStudy);
@@ -221,7 +239,7 @@ function bind() {
   document.querySelector('#calendar-next')?.addEventListener('click', () => { calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 1); render(); });
   if (page === 'settings') bindSettings();
   document.querySelector('#ranks-practice')?.addEventListener('click', resumeStudy);
-  if (page === 'storage') bindStorage({ getData: () => data, esc, notify, countLabel, onBackup: timestamp => { data.lastBackupAt = timestamp; save(); },
+  if (page === 'storage') { bindAutoBackup(); bindStorage({ getData: () => data, esc, notify, countLabel, onBackup: timestamp => { data.lastBackupAt = timestamp; save(); },
     onRestore: async restored => {
       const next = prepareData(restored);
       await commitReplacement(next);
@@ -234,8 +252,23 @@ function bind() {
       prepareData(next); await commitReplacement(next);
       filter = null; query = ''; return true;
     }, onSuccess: () => goPage('sets'),
-  });
+  }); }
+  document.querySelectorAll('[data-undo-delete]').forEach(button => button.onclick = () => undoDeletion(button.dataset.undoDelete));
   bindSets();
+}
+function updateAutoBackupUI() {
+  if (typeof autoBackup === 'undefined') return;
+  const status = document.querySelector('#auto-backup-status');
+  if (!status) return;
+  const state = autoBackup.status();
+  status.textContent = state.error || (state.saving ? 'Обновляю копию в выбранном файле…' : state.enabled ? `Автокопия включена: ${state.filename}.${state.lastWrittenAt ? ` Обновлено ${new Date(state.lastWrittenAt).toLocaleTimeString('ru-RU')}.` : ''} После закрытия или перезагрузки выбери файл снова.` : state.supported ? `${state.filename ? `Последний файл: ${state.filename}. ` : ''}Выбери отдельный JSON-файл. Он будет обновляться после изменений, пока эта страница открыта.` : 'Этот браузер не разрешает автоматически записывать отдельный файл. Используй «Скачать копию»; копия в браузере не защищает от очистки его данных.');
+  const choose = document.querySelector('#auto-backup-enable'); if (choose) choose.disabled = !state.supported;
+  const disable = document.querySelector('#auto-backup-disable'); if (disable) disable.hidden = !state.enabled;
+}
+function bindAutoBackup() {
+  document.querySelector('#auto-backup-enable').onclick = () => autoBackup.configure();
+  document.querySelector('#auto-backup-disable').onclick = () => autoBackup.disable().catch(error => notify(error.message));
+  updateAutoBackupUI();
 }
 function bindSettings() {
   const updateProfile = () => {
@@ -263,6 +296,18 @@ function bindSettings() {
     if (e.target.checked) playSound('click', true); else stopAudio();
   };
   document.querySelector('#speech-rate').oninput = e => { data.settings.speechRate = Number(e.target.value); document.querySelector('#speech-rate-label').textContent = `${data.settings.speechRate}×`; save(); };
+  document.querySelector('#speech-accent').onchange = e => { data.settings.speechAccent = e.target.value; save(); };
+  document.querySelector('#daily-new-limit').oninput = e => { const limit = Number(e.target.value); const valid = Number.isInteger(limit) && limit >= 0 && limit <= 500; e.target.setAttribute('aria-invalid', String(!valid)); if (valid) { data.settings.newCardsPerDay = limit; save(); } };
+  document.querySelector('#reminder-time').onchange = e => { if (/^\d{2}:\d{2}$/.test(e.target.value)) { data.settings.reminderTime = e.target.value; save(); } };
+  document.querySelector('#enable-reminders').onclick = async e => {
+    const status = document.querySelector('#reminder-status');
+    if (data.settings.remindersOn) { data.settings.remindersOn = false; save(); e.currentTarget.textContent = 'Включить напоминания'; return; }
+    if (!globalThis.Notification) { status.textContent = 'Браузер не поддерживает уведомления. Оставь приложение открытым: напоминание появится здесь.'; data.settings.remindersOn = true; save(); e.currentTarget.textContent = 'Выключить напоминания'; return; }
+    const button = e.currentTarget; const permission = await Notification.requestPermission();
+    data.settings.remindersOn = true; save(); button.textContent = 'Выключить напоминания';
+    status.textContent = permission === 'granted' ? 'Напоминания включены, пока приложение открыто.' : 'Уведомления браузера не разрешены. Напоминание появится внутри открытого приложения.';
+  };
+  document.querySelector('#install-app').onclick = () => installApplication();
   document.querySelector('#speech-voice').onchange = e => { data.settings.speechVoice = e.target.value; save(); };
   document.querySelector('#speech-demo').onclick = e => pronounce('Learning a little every day makes a difference.', e.currentTarget);
   document.querySelector('#reset-all-progress').onclick = () => confirmDataAction({ title: 'Сбросить весь прогресс?', description: 'Будут обнулены ответы, календарь занятий, расписание повторений, результаты карточек и опыт рангов. Наборы, вложения и настройки сохранятся.', label: 'Сбросить прогресс', cancel: () => goPage('settings'), confirm: async () => { await commitReplacement(resetAllProgress(data)); goPage('settings'); notify('Весь прогресс сброшен'); } });
@@ -271,41 +316,66 @@ function bindSets() {
   document.querySelectorAll('[data-set]').forEach(card => { card.onclick = () => openSet(card.dataset.set); card.onkeydown = e => { if (e.target === card && ['Enter', ' '].includes(e.key)) { e.preventDefault(); card.click(); } }; });
   document.querySelectorAll('[data-edit]').forEach(button => button.onclick = e => { e.stopPropagation(); editor(findSet(button.dataset.edit)); });
   document.querySelector('#empty-grid-import')?.addEventListener('click', () => goPage('storage'));
-  if (document.querySelector('#create-card')) document.querySelector('#create-card').onclick = () => editor();
+
 }
-function modal(html) {
+function modal(html, onClose = null) {
   cleanupSession();
   const origin = document.activeElement;
   if (!origin.closest('.modal')) modalReturnFocus = origin.id ? `#${CSS.escape(origin.id)}` : origin.dataset.edit ? `[data-edit="${CSS.escape(origin.dataset.edit)}"]` : origin.dataset.set ? `[data-set="${CSS.escape(origin.dataset.set)}"]` : null;
   document.querySelector('#modal-root').innerHTML = `<div class="overlay"><div class="modal" role="dialog" aria-modal="true" aria-label="${session ? 'Занятие' : 'Набор карточек'}"><button class="close" aria-label="Закрыть">${icon('close')}</button>${html}</div></div>`;
   document.querySelectorAll('#app > aside, #app > main').forEach(node => { node.inert = true; });
   document.body.classList.add('has-modal');
-  document.querySelector('.close').onclick = () => { cleanupSession(); session = null; render(); if (modalReturnFocus) document.querySelector(modalReturnFocus)?.focus({ preventScroll: true }); modalReturnFocus = null; };
+  const close = () => { cleanupSession(); session = null; if (onClose) { onClose(); return; } render(); if (modalReturnFocus) document.querySelector(modalReturnFocus)?.focus({ preventScroll: true }); modalReturnFocus = null; };
+  document.querySelector('.close').onclick = () => modalExitGuard ? modalExitGuard(close) : close();
   document.querySelector('.overlay').onclick = e => { if (e.target.classList.contains('overlay')) document.querySelector('.close').click(); };
   document.querySelector('.close').focus({ preventScroll: true });
   updateStorageStatus();
 }
-function editor(set) {
+function editor(set, resumeDraft = false) {
+  const draft = resumeDraft ? data.editorDraft : null;
+  const savedSet = set;
+  if (draft) set = { ...set, title: draft.title || '', desc: draft.desc || '', category: draft.category || '', symbol: draft.symbol, cards: draft.cards || [] };
   session = null; const selectedSymbol = symbols.some(s => s.name === set?.symbol) ? set.symbol : 'letters';
-  modal(`<div class="eyebrow">Мои наборы</div><h2>${set ? 'Редактировать набор' : 'Новый набор'}</h2><p>Меняй карточки по отдельности или добавляй сразу из текста.</p><form id="editor"><label for="deck-title">Название<input id="deck-title" name="title" required maxlength="80" value="${esc(set?.title || '')}" placeholder="Например, английский для поездок"></label><label for="deck-description">Описание<input id="deck-description" name="desc" maxlength="120" value="${esc(set?.desc || '')}" placeholder="О чём этот набор?"></label><label for="deck-category">Категория<input id="deck-category" name="category" list="category-suggestions" maxlength="40" value="${esc(set?.category || filter || '')}" placeholder="Придумай свою категорию"><small>Название категории необязательно. Новая категория появится после сохранения.</small></label><datalist id="category-suggestions">${data.categories.map(c => `<option value="${esc(c)}"></option>`).join('')}</datalist><fieldset class="symbol-field"><legend>Иконка набора</legend><div class="symbol-options">${symbols.map(item => `<label class="symbol-choice" for="deck-symbol-${item.name}"><input id="deck-symbol-${item.name}" type="radio" name="symbol" value="${item.name}" ${item.name === selectedSymbol ? 'checked' : ''}><span>${symbolIcon(item)}<small>${item.label}</small></span></label>`).join('')}</div></fieldset><div id="deck-editor-root"></div><div class="form-error" id="form-error" role="alert"></div><button class="primary" type="submit">${icon('check')} Сохранить набор</button></form>`);
-  const controller = mountDeckEditor(document.querySelector('#deck-editor-root'), set?.cards || [], { esc, icon, countLabel });
+  modal(`<div class="eyebrow">Мои наборы</div><h2>${savedSet ? 'Редактировать набор' : 'Новый набор'}</h2><p>Меняй карточки по отдельности или добавляй сразу из текста.</p><form id="editor"><label for="deck-title">Название<input id="deck-title" name="title" required maxlength="80" value="${esc(set?.title || '')}" placeholder="Например, английский для поездок"></label><label for="deck-description">Описание<input id="deck-description" name="desc" maxlength="120" value="${esc(set?.desc || '')}" placeholder="О чём этот набор?"></label><label for="deck-category">Категория<input id="deck-category" name="category" list="category-suggestions" maxlength="40" value="${esc(set?.category || filter || '')}" placeholder="Придумай свою категорию"><small>Название категории необязательно. Новая категория появится после сохранения.</small></label><datalist id="category-suggestions">${data.categories.map(c => `<option value="${esc(c)}"></option>`).join('')}</datalist><fieldset class="symbol-field"><legend>Иконка набора</legend><div class="symbol-options">${symbols.map(item => `<label class="symbol-choice" for="deck-symbol-${item.name}"><input id="deck-symbol-${item.name}" type="radio" name="symbol" value="${item.name}" ${item.name === selectedSymbol ? 'checked' : ''}><span>${symbolIcon(item)}<small>${item.label}</small></span></label>`).join('')}</div></fieldset><div id="deck-editor-root"></div><div class="form-error" id="form-error" role="alert"></div><button class="primary" type="submit">${icon('check')} Сохранить набор</button></form>`);
+  const controller = mountDeckEditor(document.querySelector('#deck-editor-root'), set?.cards || [], { esc, icon, countLabel, onChange: () => persistDraft() });
   deckEditorController = controller;
+  const formNode = document.querySelector('#editor');
+  const initialFields = [...new FormData(formNode)];
+  editorDirty = () => Boolean(draft) || controller.isDirty() || JSON.stringify([...new FormData(formNode)]) !== JSON.stringify(initialFields);
+  function persistDraft() {
+    data.editorDraft = { setId: savedSet?.id ?? null, title: formNode.elements.title.value, desc: formNode.elements.desc.value, category: formNode.elements.category.value, symbol: formNode.elements.symbol.value, cards: controller.getDraftCards(), bulkText: controller.getBulkText() };
+    save();
+  }
+  formNode.addEventListener('input', event => { if (!event.target.closest('#deck-editor-root')) persistDraft(); });
+  formNode.addEventListener('change', event => { if (!event.target.closest('#deck-editor-root')) persistDraft(); });
+  if (draft) controller.setBulkText(draft.bulkText);
+  const guard = protectModal({ isDirty: editorDirty, save: () => formNode.requestSubmit(), discard: () => { delete data.editorDraft; save(); } });
+  modalExitGuard = close => { if (!editorDirty() && data.editorDraft) { delete data.editorDraft; save(); } guard(close); };
   document.querySelector('#editor').onsubmit = async e => {
     e.preventDefault(); const form = new FormData(e.target), errorBox = document.querySelector('#form-error');
     let cards;
     try { cards = controller.getCards(); } catch (error) { errorBox.textContent = error.message; if (Number.isInteger(error.cardIndex)) controller.focusCard(error.cardIndex); return; }
+    const duplicates = duplicateCards(cards);
+    const signature = JSON.stringify(cards.map(card => [card[0], card[1]]));
+    if (duplicates.length && e.target.dataset.approvedDuplicates !== signature) {
+      errorBox.textContent = `Повторяющихся терминов: ${duplicates.length}. Проверь карточки или подтверди сохранение дубликатов.`;
+      const allow = document.createElement('button'); allow.type = 'button'; allow.className = 'secondary'; allow.id = 'allow-duplicates'; allow.textContent = 'Сохранить с дубликатами';
+      allow.onclick = () => { e.target.dataset.approvedDuplicates = signature; e.target.requestSubmit(); }; errorBox.append(allow); return;
+    }
     const title = form.get('title').trim(), name = cleanCategory(form.get('category'));
     if (!title) { errorBox.textContent = 'Название не может быть пустым.'; return; }
     const category = data.categories.find(c => categoryKey(c) === categoryKey(name)) || name;
     const symbol = symbols.find(s => s.name === form.get('symbol')) || symbols[0];
     const next = structuredClone(data);
-    const item = { ...set, id: set?.id ?? crypto.randomUUID(), title, desc: form.get('desc').trim(), category, cards, symbol: symbol.name };
+    const item = { ...savedSet, id: savedSet?.id ?? crypto.randomUUID(), title, desc: form.get('desc').trim(), category, cards, symbol: symbol.name };
     if (category && !next.categories.includes(category)) next.categories.push(category);
-    if (set) next.sets = next.sets.map(s => String(s.id) === String(set.id) ? item : s); else next.sets.push(item);
-    const removed = controller.getRemovedCards();
+    delete next.editorDraft;
+    if (savedSet) next.sets = next.sets.map(s => String(s.id) === String(savedSet.id) ? item : s); else next.sets.push(item);
+    const keptIds = new Set(cards.map(card => card[2].id));
+    const removed = (savedSet?.cards || []).filter(card => !keptIds.has(card[2].id));
     for (const card of removed) { delete next.reviews[card[2].id]; if (next.cardStats) delete next.cardStats[card[2].id]; }
     prepareData(next);
-    const controls = [...document.querySelector('.modal').querySelectorAll('button,input,textarea')];
+    const controls = [...document.querySelector('.modal').querySelectorAll('button,input,textarea,select')];
     const disabled = controls.map(node => node.disabled); controls.forEach(node => { node.disabled = true; });
     try { await commitReplacement(next); }
     catch (error) { controls.forEach((node, i) => { node.disabled = disabled[i]; }); errorBox.textContent = error.message; return; }
@@ -315,6 +385,51 @@ function editor(set) {
     if (filter !== null) filter = category || null; query = '';
     render(); document.querySelector(`[data-set="${CSS.escape(String(item.id))}"]`)?.focus({ preventScroll: true }); sound('correct'); notify(cleanupFailed ? 'Набор сохранён. Часть удалённых вложений пока осталась в хранилище.' : 'Набор сохранён');
   };
+}
+function quickCard({ card = null, studySession = null, resumeDraft = false } = {}) {
+  const quickDraft = resumeDraft ? data.quickCardDraft : null;
+  if (quickDraft?.cardId) card = data.sets.flatMap(set => set.cards).find(item => item[2].id === quickDraft.cardId) || null;
+  const target = quickDraft && findSet(quickDraft.setId) || (card ? data.sets.find(set => set.cards.some(item => item[2].id === card[2].id)) : lastStudySet());
+  if (!target) { editor(); return; }
+  session = null;
+  modal(`<h2>${card ? 'Исправить карточку' : 'Добавить карточку'}</h2><form id="quick-card-form"><label for="quick-set">Набор<select id="quick-set" ${card ? 'disabled' : ''}>${data.sets.map(set => `<option value="${esc(set.id)}" ${set === target ? 'selected' : ''}>${esc(set.title)}</option>`).join('')}</select></label><label for="quick-term">Термин<textarea id="quick-term" required rows="2">${esc(quickDraft?.term ?? card?.[0] ?? '')}</textarea></label><label for="quick-definition">Определение<textarea id="quick-definition" required rows="2">${esc(quickDraft?.definition ?? card?.[1] ?? '')}</textarea></label><details><summary>Пример и источник</summary>${[['example', 'Пример'], ['film', 'Фильм / сериал'], ['episode', 'Сезон и серия'], ['timecode', 'Таймкод']].map(([key,label]) => `<label for="quick-${key}">${label}<input id="quick-${key}" maxlength="300" value="${esc(quickDraft?.[key] ?? card?.[2]?.[key] ?? '')}"></label>`).join('')}</details><div class="form-error" id="quick-error" role="alert"></div><button class="primary" type="submit">${icon('check')} ${card ? 'Сохранить' : 'Добавить'}</button></form>`, studySession ? () => { session = studySession; study(); } : null);
+  const form = document.querySelector('#quick-card-form'), initial = [...form.querySelectorAll('input,textarea,select')].map(node => node.value);
+  const dirty = () => Boolean(quickDraft) || [...form.querySelectorAll('input,textarea,select')].some((node,index) => node.value !== initial[index]);
+  editorDirty = dirty;
+  modalExitGuard = protectModal({ isDirty: dirty, save: () => form.requestSubmit(), discard: () => { delete data.quickCardDraft; save(); } });
+  form.addEventListener('input', () => {
+    data.quickCardDraft = { setId: document.querySelector('#quick-set').value, cardId: card?.[2]?.id || null, term: document.querySelector('#quick-term').value, definition: document.querySelector('#quick-definition').value };
+    for (const key of ['example','film','episode','timecode']) data.quickCardDraft[key] = document.querySelector(`#quick-${key}`).value;
+    save();
+  });
+  form.onsubmit = async event => {
+    event.preventDefault();
+    const selected = findSet(document.querySelector('#quick-set').value), error = document.querySelector('#quick-error');
+    const term = document.querySelector('#quick-term').value.trim(), definition = document.querySelector('#quick-definition').value.trim();
+    if (!selected || !term || !definition) { error.textContent = 'Заполни термин и определение.'; return; }
+    const candidate = [term, definition];
+    if (duplicateCards([candidate], selected.cards.filter(item => item !== card)).length && form.dataset.duplicateTerm !== term) {
+      error.textContent = 'Этот термин уже есть в наборе. Добавить ещё одну карточку?';
+      const approve = document.createElement('button'); approve.type = 'button'; approve.className = 'secondary'; approve.id = 'quick-allow-duplicate'; approve.textContent = 'Да, сохранить дубликат'; approve.onclick = () => { form.dataset.duplicateTerm = term; form.requestSubmit(); }; error.append(approve); return;
+    }
+    const metadata = { ...(card?.[2] || {}), id: card?.[2]?.id || crypto.randomUUID() };
+    for (const key of ['example','film','episode','timecode']) metadata[key] = document.querySelector(`#quick-${key}`).value.trim();
+    const updated = [term, definition, metadata], next = structuredClone(data), destination = next.sets.find(set => String(set.id) === String(selected.id));
+    if (card) destination.cards = destination.cards.map(item => item[2].id === card[2].id ? updated : item); else destination.cards.push(updated);
+    delete next.quickCardDraft;
+    next.lastStudySetId = selected.id;
+    const controls = [...document.querySelector('.modal').querySelectorAll('button,input,textarea,select')];
+    const disabled = controls.map(node => node.disabled); controls.forEach(node => { node.disabled = true; });
+    try { await commitReplacement(next); }
+    catch (failure) { controls.forEach((node,index) => { node.disabled = disabled[index]; }); error.textContent = failure.message; return; }
+    if (studySession) {
+      const allCards = new Map(data.sets.flatMap(set => set.cards.map(item => [item[2].id, item])));
+      const queue = studySession.queue.map(item => allCards.get(item[2].id) || item);
+      const resumed = { ...studySession, set: studySession.set.id === null ? { ...studySession.set, cards: queue } : findSet(studySession.set.id), queue, options: null, answered: false, correctionReceipt: null };
+      session = resumed; study();
+    } else { render(); notify(card ? 'Карточка сохранена' : 'Карточка добавлена'); }
+  };
+  document.querySelector('#quick-term').focus();
 }
 function confirmDataAction({ title, description, label, cancel, confirm }) {
   session = null;
@@ -328,13 +443,31 @@ function confirmDataAction({ title, description, label, cancel, confirm }) {
     catch (error) { controls.forEach(button => { button.disabled = false; }); document.querySelector('#action-error').textContent = error.message; }
   };
 }
+function trashReminder() {
+  const entries = (data.deletedSets || []).filter(entry => entry.expiresAt > Date.now());
+  return entries.map(entry => `<section class="backup-reminder"><div><b>Удалён набор «${esc(entry.set.title)}»</b><p>Можно вернуть в течение суток. Вложения сохраняются до окончания этого срока.</p></div><button class="secondary" data-undo-delete="${esc(entry.key)}">Отменить удаление</button></section>`).join('');
+}
+async function undoDeletion(key) {
+  const entry = data.deletedSets?.find(item => item.key === key && item.expiresAt > Date.now());
+  if (!entry) { notify('Время для отмены истекло. Можно восстановить резервную копию.'); return; }
+  if (findSet(entry.set.id)) { notify('Набор с этим идентификатором уже есть. Текущие данные сохранены.'); return; }
+  const next = structuredClone(data); next.sets.splice(Math.min(entry.index, next.sets.length),0,entry.set);
+  Object.assign(next.reviews, entry.reviews); Object.assign(next.cardStats, entry.cardStats);
+  next.deletedSets = next.deletedSets.filter(item => item.key !== key); prepareData(next);
+  try { await commitReplacement(next); render(); notify('Набор и его прогресс восстановлены'); } catch (error) { notify(error.message); }
+}
+async function expireDeletedSets() {
+  if (document.querySelector('.modal') || page === 'settings' || stateStore.status.dirty || stateStore.status.saving) return;
+  const expired = (data.deletedSets || []).filter(entry => entry.expiresAt <= Date.now()); if (!expired.length) return;
+  const next = structuredClone(data); next.deletedSets = next.deletedSets.filter(entry => entry.expiresAt > Date.now());
+  const candidates = attachmentReferences(expired);
+  try { await commitReplacement(next); for (const id of collectUnreferencedAttachments(data, candidates)) await removeAttachment(id); } catch { /* Retry later; preserve recoverable files. */ }
+}
 function confirmSetDeletion(set) {
-  confirmDataAction({ title: `Удалить «${set.title}»?`, description: `${countLabel(set.cards.length, ['карточка', 'карточки', 'карточек'])}, их расписание и вложения будут удалены. Общие файлы, используемые другими карточками, сохранятся.`, label: 'Удалить набор', cancel: () => openSet(set.id), confirm: async () => {
-    const result = deleteSetData(data, set.id); await commitReplacement(result.data);
-    let cleanupFailed = false;
-    for (const id of result.removeAttachmentIds) try { await removeAttachment(id); } catch { cleanupFailed = true; }
-    filter = null; query = ''; goPage('sets'); document.querySelector('#create')?.focus({ preventScroll: true });
-    notify(cleanupFailed ? 'Набор удалён. Часть его файлов пока осталась в хранилище.' : 'Набор удалён');
+  confirmDataAction({ title: `Удалить «${set.title}»?`, description: `${countLabel(set.cards.length, ['карточка', 'карточки', 'карточек'])} будут убраны из коллекции. Удаление можно отменить в течение суток; после этого неиспользуемые вложения удалятся.`, label: 'Удалить набор', cancel: () => openSet(set.id), confirm: async () => {
+    const result = deleteSetData(data, set.id), ids = new Set(set.cards.map(card => card[2].id));
+    result.data.deletedSets = [...(data.deletedSets || []), { key: crypto.randomUUID(), set: structuredClone(set), index: data.sets.indexOf(set), expiresAt: Date.now() + 86400000, reviews: Object.fromEntries(Object.entries(data.reviews).filter(([id]) => ids.has(id))), cardStats: Object.fromEntries(Object.entries(data.cardStats).filter(([id]) => ids.has(id))) }];
+    await commitReplacement(result.data); filter = null; query = ''; goPage('sets'); notify('Набор удалён. Можно отменить удаление в течение суток.');
   } });
 }
 function confirmSetReset(set) {
@@ -356,6 +489,24 @@ function answerIndex(set, currentDirection) {
   }
   return cached[side] = { options, groups, variants: new Map(options.map(value => [value, answerVariants(value)])) };
 }
+function canTestSet(index) {
+  const usable = index.options.filter(value => index.variants.get(value).length);
+  const total = usable.length;
+  if (total < 2) return false;
+  const byAlias = new Map();
+  usable.forEach((value, i) => { for (const alias of index.variants.get(value)) { if (!byAlias.has(alias)) byAlias.set(alias, []); byAlias.get(alias).push(i); } });
+  for (const valid of index.groups.values()) {
+    if (!valid.size) return false;
+    const excluded = new Set();
+    for (const alias of valid) for (const i of byAlias.get(alias) || []) excluded.add(i);
+    if (excluded.size >= total) return false;
+  }
+  return true;
+}
+function draftReminder() {
+  const quick = data.quickCardDraft ? `<section class="backup-reminder"><div><b>Есть несохранённая карточка</b><p>Текст и источник остались в черновике.</p></div><button class="secondary" id="restore-quick-draft">Продолжить добавление</button></section>` : '';
+  return quick + (data.editorDraft ? `<section class="backup-reminder"><div><b>Есть несохранённый черновик</b><p>Продолжи редактирование — введённый текст сохранён на этом устройстве.</p></div><button class="secondary" id="restore-draft">Открыть черновик</button></section>` : '');
+}
 function validAnswers(set, card, currentDirection) {
   const side = currentDirection === 'reverse' ? 0 : 1;
   return answerIndex(set, currentDirection).groups.get(normalize(card[1 - side])) || new Set(answerVariants(card[side]));
@@ -371,10 +522,10 @@ function cardPagination(pageIndex, total, name) {
 function openSet(id, termsPage = 0) {
   session = null; const set = findSet(id); if (!set) return;
   const index = answerIndex(set, direction);
-  const canTest = set.cards.length > 0 && [...index.groups.values()].every(valid => valid.size && index.options.some(value => index.variants.get(value).length && !index.variants.get(value).some(alias => valid.has(alias))));
+  const canTest = canTestSet(index);
   termsPage = Math.max(0, Math.min(termsPage, Math.ceil(set.cards.length / 40) - 1));
-  const due = getDueCards(data, set.id), clozeCards = set.cards.filter(card => buildCloze(card)), weakCards = getWeakCards(data, set.id).slice(0, 20).map(entry => entry.card);
-  modal(`${visual(set)}<h2>${esc(set.title)}</h2><p>${esc(set.desc)} · ${countLabel(set.cards.length, ['карточка', 'карточки', 'карточек'])}</p><div class="direction-switch" aria-label="Направление обучения"><button data-direction="normal" class="${direction === 'normal' ? 'selected' : ''}">Термин → значение</button><button data-direction="reverse" class="${direction === 'reverse' ? 'selected' : ''}">Значение → термин</button></div><div class="mode-grid">${[['flash', 'layers', 'Карточки', 'Переворот, озвучка и повторение'], ['learn', 'book', 'Запоминание', 'Вводи ответ, ошибки вернутся'], ['test', 'target', 'Тест', 'Выбирай из 2–4 вариантов'], ['match', 'game', 'Найди пару', 'Сопоставь карточки на время'], ['review', 'rotate', 'Повторить', `${countLabel(due.length, ['карточка', 'карточки', 'карточек'])} по расписанию`], ['weak', 'target', 'Слабые карточки', `${countLabel(weakCards.length, ['карточка', 'карточки', 'карточек'])} с низкой точностью`], ['cloze', 'pencil', 'Пропуски', 'Вспоминай слова в предложениях'], ['listening', 'sound', 'Аудирование', 'Послушай и напиши слово'], ['pronunciation', 'mic', 'Произношение', 'Запиши и сравни с образцом']].map(([mode, glyph, label, desc]) => `<button data-mode="${mode}" ${mode === 'test' && !canTest || mode === 'review' && !due.length || mode === 'cloze' && !clozeCards.length || mode === 'weak' && !weakCards.length ? 'disabled' : ''}>${icon(glyph)}<div><b>${label}</b><span>${desc}</span></div>${icon('arrow')}</button>`).join('')}</div>${!canTest ? '<div class="study-banner">Для каждого вопроса нужен хотя бы один вариант, который не является другим правильным ответом. Добавь карточки с другими значениями или выбери другой режим.</div>' : ''}${!clozeCards.length ? '<p class="study-banner">Для пропусков добавь пример с самим словом или выражением в разделе «Картинки, аудио и примеры».</p>' : ''}${!weakCards.length ? '<p class="study-banner">После первых ответов появятся слабые карточки. Здесь собираются до 20 карточек с самой низкой долей правильных ответов.</p>' : ''}<button class="secondary" id="manage-media">${icon('image')} Картинки, аудио и примеры</button><div class="set-management"><button class="text-button" id="reset-set-progress">${icon('rotate')} Сбросить прогресс набора</button><button class="text-button danger-text" id="delete-set">${icon('close')} Удалить набор</button></div><div class="terms">${set.cards.slice(termsPage * 40, (termsPage + 1) * 40).map(c => `<div><b>${esc(c[0])}</b><span>${esc(c[1])}</span></div>`).join('')}</div>${cardPagination(termsPage, set.cards.length, 'terms')}`);
+  const due = getDueCards(data, set.id), hasCloze = set.cards.some(card => buildCloze(card)), weakCards = getWeakCards(data, set.id).slice(0, 20).map(entry => entry.card);
+  modal(`${visual(set)}<h2>${esc(set.title)}</h2><p>${set.desc ? `${esc(set.desc)} · ` : ''}${countLabel(set.cards.length, ['карточка', 'карточки', 'карточек'])}</p><div class="direction-switch" aria-label="Направление обучения"><button data-direction="normal" class="${direction === 'normal' ? 'selected' : ''}">Термин → значение</button><button data-direction="reverse" class="${direction === 'reverse' ? 'selected' : ''}">Значение → термин</button></div><div class="mode-grid">${[['flash', 'layers', 'Карточки', 'Переворот, озвучка и повторение'], ['learn', 'book', 'Запоминание', 'Вводи ответ, ошибки вернутся'], ['test', 'target', 'Тест', canTest ? 'Выбирай из 2–4 вариантов' : 'Нужны разные значения для вариантов'], ['match', 'game', 'Найди пару', 'Сопоставь карточки на время'], ['review', 'rotate', 'Повторить', `${countLabel(due.length, ['карточка', 'карточки', 'карточек'])} по расписанию`], ['starred', 'star', 'По звёздочкам', `${countLabel(set.cards.filter(card => card[2]?.starred).length, ['карточка', 'карточки', 'карточек'])}`], ['weak', 'target', 'Слабые карточки', `${countLabel(weakCards.length, ['карточка', 'карточки', 'карточек'])} с низкой точностью`], ['cloze', 'pencil', 'Пропуски', hasCloze ? 'Вспоминай слова в предложениях' : 'Добавь пример со словом в карточку'], ['listening', 'sound', 'Аудирование', 'Послушай и напиши слово'], ['pronunciation', 'mic', 'Произношение', 'Запиши и сравни с образцом']].map(([mode, glyph, label, desc]) => `<button data-mode="${mode}" ${mode === 'starred' && !set.cards.some(card => card[2]?.starred) || mode === 'test' && !canTest || mode === 'review' && !due.length || mode === 'cloze' && !hasCloze || mode === 'weak' && !weakCards.length ? 'disabled' : ''}>${icon(glyph)}<div><b>${label}</b><span>${desc}</span></div>${icon('arrow')}</button>`).join('')}</div>${!canTest ? '<div class="study-banner">Для каждого вопроса нужен хотя бы один вариант, который не является другим правильным ответом. Добавь карточки с другими значениями или выбери другой режим.</div>' : ''}${!hasCloze ? '<p class="study-banner">Для пропусков добавь пример с самим словом или выражением в разделе «Картинки, аудио и примеры».</p>' : ''}${!weakCards.length ? '<p class="study-banner">После первых ответов появятся слабые карточки. Здесь собираются до 20 карточек с самой низкой долей правильных ответов.</p>' : ''}<button class="secondary" id="manage-media">${icon('image')} Картинки, аудио и примеры</button><div class="set-management"><button class="text-button" id="reset-set-progress">${icon('rotate')} Сбросить прогресс набора</button><button class="text-button danger-text" id="delete-set">${icon('close')} Удалить набор</button></div><div class="terms">${set.cards.slice(termsPage * 40, (termsPage + 1) * 40).map(c => `<div><b>${esc(c[0])}</b><span>${esc(c[1])}</span></div>`).join('')}</div>${cardPagination(termsPage, set.cards.length, 'terms')}`);
   document.querySelectorAll('[data-direction]').forEach(button => button.onclick = () => { direction = button.dataset.direction; openSet(id); sound('click'); });
   document.querySelector('#manage-media').onclick = () => mediaManager(set);
   document.querySelector('#delete-set').onclick = () => confirmSetDeletion(set);
@@ -386,10 +537,13 @@ function openSet(id, termsPage = 0) {
     if (button.dataset.mode === 'review') { startReview(set.id); return; }
     if (button.dataset.mode === 'pronunciation') { startPronunciation(set); return; }
     if (button.dataset.mode === 'weak') { beginStudy(set, 'weak', weakCards); return; }
-    beginStudy(set, button.dataset.mode, shuffle(button.dataset.mode === 'cloze' ? clozeCards : set.cards));
+    beginStudy(set, button.dataset.mode, shuffle(button.dataset.mode === 'cloze' ? limitedCards(set.cards).filter(card => buildCloze(card)) : button.dataset.mode === 'starred' ? set.cards.filter(card => card[2]?.starred) : set.cards));
   });
 }
+function limitedCards(cards) { return limitedNewCards(data, cards.filter(card => !movieFilter || card[2]?.film === movieFilter)); }
 function beginStudy(set, mode, queue) {
+  queue = limitedCards(queue);
+  if (!queue.length) { notify('Новых карточек на сегодня достаточно. Увеличь лимит в настройках или повтори знакомые.'); return; }
   rememberStudy(set, queue[0]);
   session = { set, mode, direction: ['cloze', 'listening'].includes(mode) ? 'normal' : direction, index: 0, correct: 0, streak: 0, flipped: false, answered: false, results: [], options: null, queue };
   sound('click'); study();
@@ -401,26 +555,37 @@ function startReview(setId = null) {
   beginStudy(set, 'review', entries.map(e => e.card));
 }
 function startMatching(set) {
+  const cards = limitedCards(set.cards);
+  if (!cards.length) { notify('Лимит новых карточек на сегодня достигнут. Повтори знакомые или увеличь лимит.'); return; }
   rememberStudy(set);
   session = { set, mode: 'match', correct: 0, streak: 0 };
-  modal(`<div id="match-game"></div>`); sound('click');
-  matchController = mountMatching(document.querySelector('#match-game'), set.cards, { esc, icon, playSound, sounds: data.settings.sounds,
-    onPair: card => { record(true, card); if (session.streak % 3 === 0) celebrate(); },
-    onMistake: card => { record(false, card); },
-    onFinish: () => { sound('complete'); }, onExit: () => openSet(set.id),
+  modal(`<div id="match-game"></div>`, () => openSet(set.id)); sound('click');
+  modalExitGuard = protectModal({ isDirty: () => true, message: 'Результаты пар сохранены. Закончить игру?' });
+  matchController = mountMatching(document.querySelector('#match-game'), cards, { esc, icon, playSound, sounds: data.settings.sounds,
+    onPair: card => { introduceCard(data, card); record(true, card); if (session.streak % 3 === 0) celebrate(); },
+    onMistake: card => { introduceCard(data, card); record(false, card); },
+    onFinish: () => { sound('complete'); modalExitGuard = null; }, onExit: () => document.querySelector('.close').click(),
   });
 }
 function startPronunciation(set, index = 0) {
+  const cards = limitedCards(set.cards);
+  if (!cards.length) { notify('Лимит новых карточек на сегодня достигнут.'); return; }
+  index = Math.max(0, Math.min(index, cards.length - 1));
+  if (introduceCard(data, cards[index])) save();
   rememberStudy(set);
   session = null;
-  modal(`<div class="eyebrow">Произношение · ${esc(set.title)}</div><div id="pronunciation-root"></div><div class="study-actions pronunciation-navigation"><button class="secondary" id="pronunciation-prev" ${!index ? 'disabled' : ''}>← Предыдущее слово</button><span>${index + 1} / ${set.cards.length}</span><button class="secondary" id="pronunciation-next" ${index === set.cards.length - 1 ? 'disabled' : ''}>Следующее слово →</button></div>`);
-  pronunciationController = mountPronunciation(document.querySelector('#pronunciation-root'), set.cards[index], { esc, icon, pronounce, sound, notify, onExit: () => openSet(set.id) });
-  document.querySelector('#pronunciation-prev').onclick = () => { if (index > 0) startPronunciation(set, index - 1); };
-  document.querySelector('#pronunciation-next').onclick = () => { if (index < set.cards.length - 1) startPronunciation(set, index + 1); };
+  modal(`<div class="eyebrow">Произношение · ${esc(set.title)}</div><div id="pronunciation-root"></div><div class="study-actions pronunciation-navigation"><button class="secondary" id="pronunciation-prev" ${!index ? 'disabled' : ''}>← Предыдущее слово</button><span>${index + 1} / ${cards.length}</span><button class="secondary" id="pronunciation-next" ${index === cards.length - 1 ? 'disabled' : ''}>Следующее слово →</button></div>`, () => openSet(set.id));
+  modalExitGuard = protectModal({ isDirty: () => Boolean(pronunciationController?.hasRecording()), message: 'Запись произношения хранится только в этом занятии. Скачай её перед выходом.' });
+  pronunciationController = mountPronunciation(document.querySelector('#pronunciation-root'), cards[index], { esc, icon, pronounce, sound, notify, onExit: () => document.querySelector('.close').click() });
+  document.querySelector('#pronunciation-prev').onclick = () => { if (index > 0) modalExitGuard(() => startPronunciation(set, index - 1)); };
+  document.querySelector('#pronunciation-next').onclick = () => { if (index < cards.length - 1) modalExitGuard(() => startPronunciation(set, index + 1)); };
 }
 function choices(set, card, currentDirection) {
   const side = currentDirection === 'reverse' ? 0 : 1, correct = card[side];
   return shuffle([correct, ...shuffle(distractors(set, card, currentDirection)).slice(0, 3)]);
+}
+function studyCardActions(card) {
+  return `<div class="study-card-actions"><button class="secondary" id="star-card" aria-pressed="${Boolean(card[2]?.starred)}">${icon('star')} ${card[2]?.starred ? 'Убрать звёздочку' : 'Сложная'}</button><button class="secondary" id="edit-study-card">${icon('pencil')} Исправить карточку</button></div>${card[2]?.film ? `<p class="card-origin">${[card[2].film, card[2].episode, card[2].timecode].filter(Boolean).map(esc).join(' · ')}</p>` : ''}`;
 }
 function studyTools(card, allowExample) {
   return `<div class="study-tools"><button class="secondary" id="speak-term">${icon('sound')} Прослушать${icon('wave')}</button>${card[2]?.example && allowExample ? `<button class="secondary" id="speak-example">${icon('sound')} Пример</button>` : ''}</div>${card[2]?.example && allowExample ? `<p class="card-example">${esc(card[2].example)}</p>` : ''}${attachmentMarkup(card, esc, { audio: allowExample })}`;
@@ -444,7 +609,7 @@ async function pronounce(text, button, options = {}) {
     if (button?.dataset.speechRequest === request) { button.classList.remove('is-speaking'); button.setAttribute('aria-busy', 'false'); }
     if (status?.dataset.request === request) status.textContent = '';
   };
-  const result = await speakText(text, { voice: options.voice || data.settings.speechVoice || 'auto', rate: options.rate ?? data.settings.speechRate ?? .9, lang: options.lang,
+  const result = await speakText(text, { voice: options.voice || data.settings.speechVoice || 'auto', rate: options.rate ?? data.settings.speechRate ?? .9, lang: options.lang || (/[а-яё]/i.test(String(text)) ? 'ru-RU' : data.settings.speechAccent || 'en-US'),
     onStart: () => { if (status?.dataset.request === request) status.textContent = ''; },
     onEnd: event => { cleanup(); if (!event?.cancelled && !event?.error && (!event?.status || event.status === 'ended')) options.onEnd?.(); },
     onError: message => { options.onError?.(message); notify(message); },
@@ -455,16 +620,17 @@ async function pronounce(text, button, options = {}) {
 function study() {
   const s = session; if (!s || s.index >= s.queue.length) { finish(); return; }
   const card = s.queue[s.index], reverse = s.direction === 'reverse';
+  if (introduceCard(data, card)) save();
   const cloze = s.mode === 'cloze' ? buildCloze(card) : null;
   const listening = s.mode === 'listening' ? buildListening(card) : null;
   const prompt = card[reverse ? 1 : 0], expected = cloze?.answer || listening?.answer || card[reverse ? 0 : 1];
   s.expected = expected;
-  const isCard = ['flash', 'review', 'weak'].includes(s.mode);
+  const isCard = ['flash', 'review', 'weak', 'starred'].includes(s.mode);
   if (s.mode === 'test' && !s.options) s.options = choices(s.set, card, s.direction);
   const daily = dailyProgress(data), rank = rankProgress(data);
   let exercise;
   if (isCard) {
-    exercise = `<button class="flashcard" id="flip" aria-label="${esc(prompt)}. Перевернуть карточку" aria-pressed="false"><div class="flashcard-inner"><div class="flash-face flash-front" aria-hidden="false"><span>${reverse ? 'Значение' : 'Термин'}</span><h2>${esc(prompt)}</h2></div><div class="flash-face flash-back" aria-hidden="true"><span>${reverse ? 'Термин' : 'Значение'}</span><h2>${esc(expected)}</h2></div></div><small class="flip-caption">${icon('rotate')} Нажми, чтобы перевернуть</small></button>${studyTools(card, true)}<div class="study-actions rating-actions"><button class="secondary" id="again">${icon('rotate')} Ещё повторить</button><button class="secondary" id="hard">${icon('wave')} Трудно</button><button class="primary" id="known">${icon('check')} Знаю</button><button class="secondary" id="easy">${icon('bolt')} Легко</button></div><p class="keyboard-hint"><kbd>Пробел</kbd> переворачивает · <kbd>1</kbd> ещё повторить · <kbd>2</kbd> знаю · <kbd>3</kbd> легко</p>`;
+    exercise = `<button class="flashcard" id="flip" aria-label="${esc(prompt)}. Перевернуть карточку" aria-pressed="false"><div class="flashcard-inner"><div class="flash-face flash-front" aria-hidden="false"><span>${reverse ? 'Значение' : 'Термин'}</span><h2>${esc(prompt)}</h2></div><div class="flash-face flash-back" aria-hidden="true"><span>${reverse ? 'Термин' : 'Значение'}</span><h2>${esc(expected)}</h2></div></div><small class="flip-caption">${icon('rotate')} Нажми, чтобы перевернуть</small></button>${studyTools(card, true)}<div class="study-actions rating-actions"><button class="secondary" id="again">${icon('rotate')} Ещё повторить</button><button class="secondary" id="hard">${icon('wave')} Трудно</button><button class="primary" id="known">${icon('check')} Знаю</button><button class="secondary" id="easy">${icon('bolt')} Легко</button></div><p class="keyboard-hint"><kbd>Пробел</kbd> переворачивает · <kbd>1</kbd> ещё повторить · <kbd>2</kbd> знаю · <kbd>3</kbd> легко · <kbd>4</kbd> трудно</p>`;
   } else {
     let question;
     if (cloze) question = `<div class="question"><span>Впиши пропущенное слово или выражение</span><p class="cloze-sentence">${esc(cloze.before)}<span class="cloze-blank" aria-label="Пропущенные слова">••••</span>${esc(cloze.after)}</p></div><div class="study-tools"><button class="secondary" id="speak-term">${icon('sound')} Послушать предложение ${icon('wave')}</button></div>`;
@@ -473,9 +639,12 @@ function study() {
     const answer = s.mode === 'test' ? `<div class="answer-options" aria-label="Варианты ответа">${s.options.map((option, index) => `<button class="answer-option" data-choice="${index}"><span class="option-key">${index + 1}</span><span class="option-text">${esc(option)}</span><span class="option-status"></span></button>`).join('')}</div><p class="test-caption">Один правильный ответ · можно нажать цифру варианта</p><div id="feedback" role="status" aria-live="polite"></div><button class="primary" id="next-question" disabled>Выбери ответ ${icon('arrow')}</button>` : `<form id="answer-form"><input id="answer" aria-label="Твой ответ" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${listening ? 'Напиши услышанное…' : cloze ? 'Пропущенное слово или выражение…' : 'Твой ответ…'}" required><div id="feedback" role="status" aria-live="polite"></div><button class="primary" type="submit">Проверить ${icon('arrow')}</button></form><button class="hint" id="hint">Нужна подсказка?</button>`;
     exercise = question + answer;
   }
-  const labels = { weak: 'Слабые карточки', flash: 'Карточки', review: 'Интервальное повторение', test: 'Тест', learn: 'Запоминание', cloze: 'Пропуски', listening: 'Аудирование' };
+  const labels = { starred: 'По звёздочкам', weak: 'Слабые карточки', flash: 'Карточки', review: 'Интервальное повторение', test: 'Тест', learn: 'Запоминание', cloze: 'Пропуски', listening: 'Аудирование' };
   const directionLabel = cloze ? 'Предложение → слово' : listening ? 'Слушаю → пишу' : reverse ? 'Значение → термин' : 'Термин → значение';
-  modal(`<div class="eyebrow">${labels[s.mode]} · ${esc(s.set.title)}</div><div class="study-meta"><span>${s.index + 1} / ${s.queue.length}</span><span class="direction-badge">${directionLabel}</span><span class="streak ${s.streak >= 3 ? 'is-hot' : ''}">${icon('bolt')} <span>${s.streak} подряд</span></span></div><div class="progress-track"><i style="width:${s.index / s.queue.length * 100}%"></i></div>${exercise}<p class="study-daily">Сегодня: ${daily.answers} / ${daily.goal} ответов</p><p class="study-xp">${rank.name} · ${rank.xp} XP</p>`);
+  modal(`<div class="eyebrow">${labels[s.mode]} · ${esc(s.set.title)}</div><div class="study-meta"><span>${s.index + 1} / ${s.queue.length}</span><span class="direction-badge">${directionLabel}</span><span class="streak ${s.streak >= 3 ? 'is-hot' : ''}">${icon('bolt')} <span>${s.streak} подряд</span></span></div><div class="progress-track"><i style="width:${s.index / s.queue.length * 100}%"></i></div>${studyCardActions(card)}${exercise}<p class="study-daily">Сегодня: ${daily.answers} / ${daily.goal} ответов</p><p class="study-xp">${rank.name} · ${rank.xp} XP</p>`);
+  modalExitGuard = protectModal({ isDirty: () => true, message: 'Ответы и прогресс уже сохранены. Закончить это занятие?' });
+  document.querySelector('#star-card')?.addEventListener('click', e => { card[2].starred = !card[2].starred; save(); e.currentTarget.setAttribute('aria-pressed', String(card[2].starred)); e.currentTarget.innerHTML = `${icon('star')} ${card[2].starred ? 'Убрать звёздочку' : 'Сложная'}`; });
+  document.querySelector('#edit-study-card')?.addEventListener('click', () => quickCard({ card, studySession: s }));
   hydrateAttachments(document.querySelector('.modal'));
   document.querySelector('#speak-term').onclick = e => pronounce(cloze?.sentence || listening?.prompt || (isCard ? card[0] : prompt), e.currentTarget);
   document.querySelector('#speak-example')?.addEventListener('click', e => pronounce(card[2].example, e.currentTarget));
@@ -522,6 +691,7 @@ function chooseAnswer(index) {
   const next = document.querySelector('#next-question'); next.disabled = false; next.innerHTML = `${nextLabel()} ${icon('arrow')}`; next.focus();
 }
 function acceptAnswer(answer, ok) {
+  const edit = document.querySelector('#edit-study-card'); if (edit) edit.disabled = true;
   const card = session.queue[session.index], expected = session.expected || card[session.direction === 'reverse' ? 0 : 1];
   const now = Date.now();
   session.correctionReceipt = !ok && session.mode !== 'test' ? { cardId: card[2].id, now, streakBefore: session.streak, retryIndex: session.queue.length - 1, corrected: false, reviewBefore: Object.hasOwn(data.reviews, card[2].id) ? structuredClone(data.reviews[card[2].id]) : null } : null;
@@ -633,7 +803,7 @@ async function removeMedia(card, kind) {
 }
 document.addEventListener('pointerdown', () => { if (data.settings.sounds) unlockAudio(); }, { once: true });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') { document.querySelector('.close')?.click(); return; }
+  if (e.key === 'Escape') { e.preventDefault(); const keep = document.querySelector('#keep-editing'); if (keep) keep.click(); else document.querySelector('.close')?.click(); return; }
   const dialog = document.querySelector('.modal');
   if (e.key === 'Tab' && dialog) {
     const focusable = [...dialog.querySelectorAll('button, a[href], input, textarea, select, audio[controls], [tabindex]')].filter(node => !node.disabled && node.tabIndex >= 0 && node.getClientRects().length);
@@ -642,8 +812,8 @@ document.addEventListener('keydown', e => {
     return;
   }
   if (!session || e.repeat || e.altKey || e.ctrlKey || e.metaKey || e.target.closest('input,textarea,select,[contenteditable="true"],audio,video')) return;
-  if (['flash', 'review', 'weak'].includes(session.mode)) {
-    const action = e.key === ' ' || e.code === 'Space' ? 'flip' : { '1': 'again', '2': 'known', '3': 'easy' }[e.key];
+  if (['flash', 'review', 'weak', 'starred'].includes(session.mode)) {
+    const action = e.key === ' ' || e.code === 'Space' ? 'flip' : { '1': 'again', '2': 'known', '3': 'easy', '4': 'hard' }[e.key];
     if (action) { e.preventDefault(); document.getElementById(action)?.click(); }
     return;
   }
@@ -651,5 +821,20 @@ document.addEventListener('keydown', e => {
 });
 window.matchMedia?.('(prefers-color-scheme: dark)').addEventListener('change', () => applyTheme(data.settings));
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') void stateStore.flush().catch(() => {}); });
-window.addEventListener('pagehide', () => { void stateStore.flush().catch(() => {}); });
+window.addEventListener('beforeunload', event => { if (editorDirty()) { event.preventDefault(); event.returnValue = ''; } void stateStore.flush().catch(() => {}); });
+window.addEventListener('pagehide', () => { void autoBackup.flush(); void stateStore.flush().catch(() => {}); });
 save(); render();
+
+startPWA();
+setInterval(() => {
+  if (!data.settings.remindersOn || dailyProgress(data).complete) return;
+  const now = new Date(), time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`, day = localDay(now);
+  if (time < (data.settings.reminderTime || '19:00') || data.lastReminderDay === day) return;
+  data.lastReminderDay = day; save(); notify('Время повторить фразы — твоя ежедневная цель ждёт.');
+  if (globalThis.Notification?.permission === 'granted') {
+    try { new Notification('zhekandus: время повторить', { body: 'Потренируй фразы и сохрани свою серию занятий.', tag: 'zhekandus-daily' }); } catch { navigator.serviceWorker?.ready.then(registration => registration.showNotification('Время повторить фразы', { body: 'Потренируй свою коллекцию.' })).catch(() => {}); }
+  }
+}, 30000);
+
+void expireDeletedSets();
+setInterval(() => { void expireDeletedSets(); }, 60000);

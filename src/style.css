@@ -923,3 +923,45 @@ kbd { display: inline-block; padding: 1px 6px; border: 1px solid var(--line-stro
   .stats-row > div:nth-child(2) { border-right: 0; }
   .stats-row > div:nth-child(n+3) { border-top: 1px solid var(--line); }
 }
+/* Controls remain usable with fingers and with increased text size. */
+.close, .more, .icon-button { min-width: 44px; min-height: 44px; }
+.text-button { min-height: 44px; padding: 8px 6px; }
+.set-management { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.set-management button { justify-content: center; border: 1px solid var(--line); border-radius: 9px; padding: 12px; }
+.bulk-options { display: grid; gap: 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.modal form .bulk-options label { margin: 12px 0; }
+.bulk-preview .terms { margin: 8px 0; }
+.exit-confirmation { border: 2px solid var(--accent); background: var(--surface); padding: 22px; border-radius: 12px; margin: 0 0 22px; position: sticky; top: 0; z-index: 5; }
+.exit-confirmation h3 { margin: 0; }
+.exit-confirmation .study-actions { display: flex; flex-wrap: wrap; }
+.card-source-fields { margin-top: 16px; }
+.study-card-actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 16px 0; }
+.study-card-actions .secondary { font-size: 14px; }
+.card-origin { font-size: 15px; color: var(--muted); overflow-wrap: anywhere; }
+.mode-grid button:disabled { opacity: .75; }
+@media (max-width: 750px) {
+  aside { padding: 15px 20px; }
+  aside > nav { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; border-top: 1px solid var(--line); background: var(--surface); padding: 6px 5px max(6px, env(safe-area-inset-bottom)); margin: 0; gap: 2px; }
+  aside .nav { display: flex; flex-direction: column; min-height: 60px; padding: 6px 1px; gap: 5px; font-size: 11px; line-height: 1.15; text-align: center; }
+  .nav-label { overflow-wrap: anywhere; }
+  .nav[data-page="storage"] .nav-label { font-size: 10px; }
+  main { padding-bottom: calc(90px + env(safe-area-inset-bottom)); }
+  body.has-modal aside > nav { visibility: hidden; }
+  .header-right { gap: 5px; }
+  .bulk-options { grid-template-columns: 1fr; }
+  .set-management { grid-template-columns: 1fr; }
+  .modal { padding-bottom: max(24px, env(safe-area-inset-bottom)); }
+  .toast { bottom: calc(90px + env(safe-area-inset-bottom)); }
+}
+@media (max-width: 480px) { header { gap: 6px; } .breadcrumb { font-size: 12px; } }
+.film-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 0 0 20px; font-weight: 600; }
+.film-filter select { min-height: 44px; max-width: 100%; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--ink); padding: 8px 12px; }
+.storage-view > .storage-panel { margin-bottom: 24px; }
+
+.nav-label-mobile { display: none; }
+.deck-bulk > summary, .card-source-fields > summary, #quick-card-form summary { min-height: 44px; padding: 11px 0; cursor: pointer; }
+.hint { min-height: 44px; }
+@media (max-width: 750px) {
+  .nav .nav-label { display: none; }
+  .nav .nav-label-mobile { display: inline; font-size: 12px; line-height: 1.25; }
+}

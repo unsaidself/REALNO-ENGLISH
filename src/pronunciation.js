@@ -320,6 +320,7 @@ export function mountPronunciation(container, card, { esc = escapeText, icon = (
   player.addEventListener('error', playerError);
 
   return {
+    hasRecording() { return Boolean(recordingURL) || recordingState !== 'idle'; },
     destroy() {
       if (destroyed) return;
       destroyed = true;

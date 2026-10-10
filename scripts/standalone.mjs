@@ -50,7 +50,7 @@ const html = `<!doctype html>
     const message = document.createElement('p');
     message.textContent = reason;
     const help = document.createElement('p');
-    help.textContent = 'Перезагрузи страницу. Если ошибка повторяется, скачай свежий архив, распакуй его и открой zhekandus.html в браузере.';
+    help.textContent = 'Перезагрузи страницу. Если ошибка повторяется, скачай проверенный архив, распакуй его и открой zhekandus.html в браузере.';
     const actions = document.createElement('div');
     actions.style.cssText = 'display:flex;flex-wrap:wrap;gap:12px';
     const reload = document.createElement('button');
@@ -60,8 +60,8 @@ const html = `<!doctype html>
     reload.addEventListener('click', () => location.reload());
     const download = document.createElement('a');
     download.className = 'secondary';
-    download.href = 'https://github.com/unsaidself/REALNO-ENGLISH/raw/refs/heads/codex/zhekandus-download-20261008/zhekandus.zip';
-    download.textContent = 'Скачать свежий файл';
+    download.href = 'https://github.com/unsaidself/REALNO-ENGLISH/raw/f24b2240bc1c5b4b5a0838a6893e805a6e1ff030/zhekandus.zip';
+    download.textContent = 'Скачать проверенную версию';
     actions.append(reload, download);
     panel.append(heading, message, help, actions);
     app.replaceChildren(panel);
