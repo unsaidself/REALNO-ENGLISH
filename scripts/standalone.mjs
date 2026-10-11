@@ -61,7 +61,7 @@ const html = `<!doctype html>
     reload.addEventListener('click', () => location.reload());
     const download = document.createElement('a');
     download.className = 'secondary';
-    download.href = 'https://github.com/unsaidself/REALNO-ENGLISH/raw/f24b2240bc1c5b4b5a0838a6893e805a6e1ff030/zhekandus.zip';
+    download.href = 'https://github.com/unsaidself/REALNO-ENGLISH/raw/94d5d3c5f23c3fe6f59fa7e3e1181a1fc5baad5a/zhekandus.zip';
     download.textContent = 'Скачать проверенную версию';
     actions.append(reload, download);
     panel.append(heading, message, help, actions);
