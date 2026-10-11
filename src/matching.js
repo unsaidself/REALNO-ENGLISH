@@ -51,7 +51,7 @@ function formatTime(seconds) {
 }
 
 /** Mount an independent, timed matching round without modifying the source cards. */
-export function mountMatching(container, cards, { esc = escapeText, icon = () => '', playSound = () => {}, onPair = () => {}, onMistake = () => {}, onFinish = () => {}, onExit = () => {}, sounds = true } = {}) {
+export function mountMatching(container, cards, { esc = escapeText, icon = () => '', onPair = () => {}, onMistake = () => {}, onFinish = () => {}, onExit = () => {} } = {}) {
   const pairs = choosePairs(cards);
   const selected = { term: null, definition: null };
   let startedAt = null;
@@ -124,7 +124,7 @@ export function mountMatching(container, cards, { esc = escapeText, icon = () =>
       matched++;
       container.querySelector('.match-count').textContent = `${matched} / ${pairs.length}`;
       message.textContent = matched === pairs.length ? 'Последняя пара найдена!' : 'Есть пара! Продолжай в том же духе.';
-      playSound('match', sounds);
+
       onPair(pair.card);
       if (!destroyed && matched === pairs.length) complete();
       return;
@@ -135,7 +135,7 @@ export function mountMatching(container, cards, { esc = escapeText, icon = () =>
     term.classList.add('is-wrong');
     definition.classList.add('is-wrong');
     message.textContent = 'Эти карточки не подходят друг другу. Попробуй ещё раз.';
-    playSound('wrong', sounds);
+
     onMistake(pairs.find(item => item.id === term.dataset.matchId).card);
     if (destroyed) return;
     resetTimeout = setTimeout(() => {

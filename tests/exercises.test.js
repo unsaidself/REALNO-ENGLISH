@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCloze, buildListening, evaluateCloze, evaluateListening, normalizeExerciseAnswer, normalizeTypedAnswer, answerVariants, matchesTypedAnswer } from '../src/exercises.js';
+import { buildCloze, evaluateCloze, normalizeExerciseAnswer, normalizeTypedAnswer, answerVariants, matchesTypedAnswer } from '../src/exercises.js';
 
 const card = (term, example) => [term, 'определение', { example }];
 
@@ -61,17 +61,6 @@ test('regex metacharacters and repeated occurrences keep the right substring', (
   assert.equal(repeated.after, '. Really take your time.');
 });
 
-test('listening matches spelling independent of punctuation and spacing', () => {
-  const listening = buildListening(card('Carry-on luggage', ''));
-  assert.deepEqual(listening, { prompt: 'Carry-on luggage', answer: 'Carry-on luggage' });
-  assert.equal(evaluateListening('carry on luggage!', listening), true);
-  assert.equal(evaluateListening('carry on bags', listening), false);
-  assert.equal(evaluateListening('', listening), false);
-  assert.equal(evaluateListening('уже', ['Ужё', 'test']), true);
-  assert.equal(buildListening(['', 'test']), null);
-  assert.equal(evaluateListening('', null), false);
-  assert.equal(normalizeExerciseAnswer('  “Don’t”    panic!  '), 'dont panic');
-});
 
 test('typed answers accept infinitives, grammatical annotations, and slash alternatives', () => {
   assert.equal(normalizeTypedAnswer('  TO Remember (глагол) [B1] {note}!  '), 'remember');
@@ -112,14 +101,4 @@ test('sentence-gap aliases preserve the genuine occurrence and accept other save
   const cpp = buildCloze(card('C++ (язык)', 'We write C++ today.'));
   assert.equal(cpp.answer, 'C++');
   assert.equal(cpp.prompt, 'We write ____ today.');
-});
-
-test('listening speaks the first clean alternative while all saved alternatives can be typed', () => {
-  const exercise = buildListening(card('To remember (глагол) / recall', ''));
-  assert.equal(exercise.prompt, 'To remember');
-  assert.equal(exercise.answer, 'To remember (глагол) / recall');
-  assert.equal(evaluateListening('remember', exercise), true);
-  assert.equal(evaluateListening('recall', exercise), true);
-  assert.equal(evaluateListening('forget', exercise), false);
-  assert.equal(buildListening(card('(note)', '')), null);
 });

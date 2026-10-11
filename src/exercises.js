@@ -1,4 +1,4 @@
-/** Pure helpers for typed listening and sentence-gap practice. */
+/** Pure helpers for typed answers and sentence-gap practice. */
 const readable = value => typeof value === 'string' ? value.trim() : '';
 const escapePattern = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -102,13 +102,6 @@ export function buildCloze(card) {
   return { sentence, before, after, answer, prompt: `${before}____${after}`, ...(aliases.length > 1 ? { alternatives: aliases } : {}) };
 }
 
-/** The written answer is deliberately separate from the UI's listening prompt. */
-export function buildListening(card) {
-  if (!Array.isArray(card)) return null;
-  const answer = readable(card[0]);
-  const prompt = rawAnswerVariants(answer)[0];
-  return prompt ? { prompt, answer } : null;
-}
 
 function evaluate(answer, exercise) {
   return Boolean(exercise) && matchesTypedAnswer(answer, [exercise.answer, ...(exercise.alternatives || [])]);
@@ -116,8 +109,4 @@ function evaluate(answer, exercise) {
 
 export function evaluateCloze(answer, exerciseOrCard) {
   return evaluate(answer, Array.isArray(exerciseOrCard) ? buildCloze(exerciseOrCard) : exerciseOrCard);
-}
-
-export function evaluateListening(answer, exerciseOrCard) {
-  return evaluate(answer, Array.isArray(exerciseOrCard) ? buildListening(exerciseOrCard) : exerciseOrCard);
 }

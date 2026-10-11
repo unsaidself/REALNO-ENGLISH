@@ -47,8 +47,6 @@ function ensureHistory(data) {
   const accent = String(data.settings.accent || '').toLowerCase();
   data.settings.theme = THEMES.has(theme) ? theme : 'light';
   data.settings.accent = ACCENTS.has(accent) ? accent : 'teal';
-  const sounds = data.settings.sounds;
-  data.settings.sounds = sounds === undefined || sounds === null ? true : ![false, 0, '0', 'false', 'off'].includes(sounds);
   const goal = Number(data.settings.goal);
   data.settings.goal = Number.isFinite(goal) && goal > 0 ? Math.min(500, Math.max(1, Math.round(goal))) : 20;
   return data;

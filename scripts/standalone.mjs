@@ -15,21 +15,19 @@ const entries = output.filter(item => item.type === 'chunk' && item.isEntry);
 if (entries.length !== 1 || entries[0].imports.length || entries[0].dynamicImports.length) {
   throw new Error('Standalone build must contain one self-contained JavaScript entry.');
 }
-// Compress the complete JavaScript bundle, including voice data. The browser
+// Compress the complete JavaScript bundle, without external runtime dependencies. The browser
 // expands it locally; no URL, CDN, fetch, or additional file is needed.
 const moduleBytes = Buffer.from(entries[0].code, 'utf8');
 const compressedBytes = gzipSync(moduleBytes, { level: 9 });
 const script = compressedBytes.toString('base64');
 const css = output.filter(item => item.type === 'asset' && item.fileName.endsWith('.css')).map(item => item.source).join('\n');
-const speechNotice = await readFile(resolve(root, 'src/voice/NOTICE'), 'utf8');
-const speechLicense = await readFile(resolve(root, 'src/voice/LICENSE'), 'utf8');
+const speechNotice = await readFile(resolve(root, 'licenses/LEGACY-ESPEAK-NOTICE.txt'), 'utf8');
+const speechLicense = await readFile(resolve(root, 'licenses/LEGACY-ESPEAK-GPL-3.txt'), 'utf8');
 const licenseComment = `${speechNotice}\n${speechLicense}`;
 if (/-->|--!>/.test(licenseComment)) throw new Error('Speech license must be embedded as a safe, verbatim HTML comment.');
-const neuralComment = (await Promise.all(['src/voice/PIPER-NOTICE','licenses/DIFFUSIONSTUDIO-MIT.txt','licenses/PIPER-MIT.txt','licenses/ONNX-RUNTIME-MIT.txt'].map(name=>readFile(resolve(root,name),'utf8')))).join('\n');
-if (/-->|--!>/.test(neuralComment)) throw new Error('Neural speech notice must be embedded as a safe, verbatim HTML comment.');
 const html = `<!doctype html>
 <!-- Local speech engine license and source information:\n${licenseComment}\n-->
-<!-- Optional neural speech licenses and source information:\n${neuralComment}\n-->
+<!-- Historical eSpeak notice retained; the current app has no audio functionality. -->
 <html lang="ru"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#f5f7f3">
