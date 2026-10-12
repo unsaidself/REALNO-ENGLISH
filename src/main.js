@@ -96,6 +96,16 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;
 const normalize = value => String(value).toLowerCase().replace(/ё/g, 'е').replace(/[.,!?]/g, '').trim().replace(/\s+/g, ' ');
 const word = (n, forms) => forms[n % 100 >= 11 && n % 100 <= 14 ? 2 : n % 10 === 1 ? 0 : n % 10 >= 2 && n % 10 <= 4 ? 1 : 2];
 const countLabel = (n, forms) => `${n} ${word(n, forms)}`;
+const streakTone = count => count >= 9 ? 'coral' : count >= 6 ? 'amber' : count >= 3 ? 'blue' : count > 0 ? 'teal' : 'quiet';
+function streakMarkup(count) {
+  return `<span class="streak" data-streak-tone="${streakTone(count)}" role="status" aria-live="polite" aria-atomic="true">${icon('bolt')} <span>${count} подряд</span></span>`;
+}
+function updateStreak() {
+  const badge = document.querySelector('.streak');
+  if (!badge || !session) return;
+  badge.dataset.streakTone = streakTone(session.streak);
+  badge.querySelector('span').textContent = `${session.streak} подряд`;
+}
 function save() { autoBackup.request(); return stateStore.save(data); }
 async function saveNow() { await stateStore.commit(data); return true; }
 async function commitReplacement(next) {
@@ -530,11 +540,11 @@ function startMatching(set) {
   if (!cards.length) { notify('Лимит новых карточек на сегодня достигнут. Повтори знакомые или увеличь лимит.'); return; }
   rememberStudy(set);
   session = { set, mode: 'match', correct: 0, streak: 0 };
-  modal(`<div id="match-game"></div>`, () => openSet(set.id));
+  modal(`<div class="match-streak">${streakMarkup(session.streak)}</div><div id="match-game"></div>`, () => openSet(set.id));
   modalExitGuard = protectModal({ isDirty: () => true, message: 'Результаты пар сохранены. Закончить игру?' });
   matchController = mountMatching(document.querySelector('#match-game'), cards, { esc, icon,
-    onPair: card => { introduceCard(data, card); record(true, card); if (session.streak % 3 === 0) celebrate(); },
-    onMistake: card => { introduceCard(data, card); record(false, card); },
+    onPair: card => { introduceCard(data, card); record(true, card); updateStreak(); },
+    onMistake: card => { introduceCard(data, card); record(false, card); updateStreak(); },
     onFinish: () => { modalExitGuard = null; }, onExit: () => document.querySelector('.close').click(),
   });
 }
@@ -581,7 +591,7 @@ function study() {
   }
   const labels = { starred: 'По звёздочкам', weak: 'Слабые карточки', flash: 'Карточки', review: 'Интервальное повторение', test: 'Тест', learn: 'Запоминание', cloze: 'Пропуски' };
   const directionLabel = cloze ? 'Предложение → слово' : reverse ? 'Значение → термин' : 'Термин → значение';
-  modal(`<div class="eyebrow">${labels[s.mode]} · ${esc(s.set.title)}</div><div class="study-meta"><span>${s.index + 1} / ${s.queue.length}</span><span class="direction-badge">${directionLabel}</span><span class="streak ${s.streak >= 3 ? 'is-hot' : ''}">${icon('bolt')} <span>${s.streak} подряд</span></span></div><div class="progress-track"><i style="width:${s.index / s.queue.length * 100}%"></i></div>${studyCardActions(card)}${exercise}<p class="study-daily">Сегодня: ${daily.answers} / ${daily.goal} ответов</p>`);
+  modal(`<div class="eyebrow">${labels[s.mode]} · ${esc(s.set.title)}</div><div class="study-meta"><span>${s.index + 1} / ${s.queue.length}</span><span class="direction-badge">${directionLabel}</span>${streakMarkup(s.streak)}</div><div class="progress-track"><i style="width:${s.index / s.queue.length * 100}%"></i></div>${studyCardActions(card)}${exercise}<p class="study-daily">Сегодня: ${daily.answers} / ${daily.goal} ответов</p>`);
   modalExitGuard = protectModal({ isDirty: () => true, message: 'Ответы и прогресс уже сохранены. Закончить это занятие?' });
   document.querySelector('#star-card')?.addEventListener('click', e => { card[2].starred = !card[2].starred; save(); e.currentTarget.setAttribute('aria-pressed', String(card[2].starred)); e.currentTarget.innerHTML = `${icon('star')} ${card[2].starred ? 'Убрать звёздочку' : 'Сложная'}`; });
   document.querySelector('#edit-study-card')?.addEventListener('click', () => quickCard({ card, studySession: s }));
@@ -598,7 +608,7 @@ function study() {
     };
     document.querySelector('#again').onclick = () => { record(false, card, 'again'); s.queue.push(card); nextCard(); };
     for (const [id, grade] of [['hard', 'hard'], ['known', 'good'], ['easy', 'easy']]) {
-      document.querySelector(`#${id}`).onclick = () => { record(true, card, grade); if (s.streak % 3 === 0) celebrate(); nextCard(); };
+      document.querySelector(`#${id}`).onclick = () => { record(true, card, grade); nextCard(); };
     }
   } else if (s.mode === 'test') {
     document.querySelectorAll('[data-choice]').forEach(button => button.onclick = () => chooseAnswer(Number(button.dataset.choice)));
@@ -647,9 +657,8 @@ function showFeedback(ok, expected, corrected = false) {
     const spelling = document.createElement('p'); spelling.className = 'test-caption'; spelling.textContent = `Опечатка засчитана. Верное написание: ${expected}`;
     document.querySelector('#feedback').append(spelling);
   }
-  const streak = document.querySelector('.streak'); streak.classList.toggle('is-hot', session.streak >= 3); streak.innerHTML = `${icon('bolt')} <span>${session.streak} подряд</span>`;
+  updateStreak();
   const daily = dailyProgress(data); document.querySelector('.study-daily').textContent = `Сегодня: ${daily.answers} / ${daily.goal} ответов`;
-  if (ok && session.streak % 3 === 0) celebrate();
 }
 function correctCurrentAnswer() {
   const s = session, receipt = s?.correctionReceipt, card = s?.queue[s.index];
@@ -668,12 +677,6 @@ function record(ok, card, grade = ok, now = Date.now()) {
   session.correct += ok ? 1 : 0; session.streak = ok ? session.streak + 1 : 0;
   data.answers++; if (ok) data.learned++; scheduleReview(data, card, grade, now); recordDaily(data, ok, now); save();
   if (!wasComplete && dailyProgress(data).complete) { notify(`Дневная цель выполнена: ${data.settings.goal} ответов!`); }
-}
-function celebrate() {
-  document.querySelector('.celebration')?.remove();
-  const celebration = document.createElement('div'); celebration.className = 'celebration'; celebration.setAttribute('role', 'status');
-  celebration.innerHTML = `<div>${icon('trophy')}<b>${session.streak} подряд!</b><span>Отличная серия</span></div>${Array.from({ length: 42 }, (_, i) => `<i style="--x:${Math.random() * 100}vw;--delay:${Math.random() * .35}s;--color:${['#1f9b85', '#e8b65a', '#4e8abd'][i % 3]}"></i>`).join('')}`;
-  document.body.append(celebration); setTimeout(() => celebration.remove(), 2600);
 }
 function finish() {
   const s = session; if (!s) return;
