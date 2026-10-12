@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { deleteSet, resetSetProgress, resetAllProgress, rememberStudySet, lastStudySet, attachmentReferences, collectUnreferencedAttachments, attachmentGarbage } from '../src/data-operations.js';
-import { ensureRankData, awardRankXP, rankProgress } from '../src/ranks.js';
 import { ensurePracticeData, getDueCards } from '../src/practice.js';
 
 function fixture() {
@@ -29,7 +28,7 @@ function freezeDeep(value) {
   return value;
 }
 
-test('delete plans preserve shared/future-reference blobs, other card history, and historical XP', () => {
+test('delete plans preserve shared/future-reference blobs, other card history, and optional legacy fields', () => {
   const input = freezeDeep(fixture());
   const before = JSON.stringify(input), result = deleteSet(input, '1');
   assert.equal(JSON.stringify(input), before);
@@ -68,23 +67,23 @@ test('set reset clears exactly its schedule and accuracy, keeping global statist
   assert.equal(getDueCards(runtime, 2, 1).length, 0);
 });
 
-test('full reset restarts XP/caps and activity, while retaining settings, media and optional fields', () => {
+test('full reset restarts activity, while retaining settings, media and optional legacy fields', () => {
   const input = freezeDeep(fixture()), output = resetAllProgress(input);
   assert.equal(output.answers, 0); assert.equal(output.learned, 0);
   for (const key of ['daily', 'reviews', 'cardStats']) assert.deepEqual(output[key], {});
   assert.deepEqual(output.days, []);
-  assert.equal(output.rank.xp, 0); assert.equal(output.rank.version, 1); assert.deepEqual(output.rank.daily, {});
-  assert.equal(output.rank.optionalFutureRank, true);
+  assert.equal(output.rank, input.rank);
   for (const key of ['sets', 'settings', 'categories', 'futureState']) assert.equal(output[key], input[key]);
   assert.equal(output.lastBackupAt, input.lastBackupAt);
   assert.deepEqual(attachmentGarbage(input, output), []);
-  // Normalization must not rebuild XP from the former correct-answer total.
+  // Study normalization preserves inert legacy fields and creates no awards.
   const runtime = structuredClone(output);
-  ensurePracticeData(runtime); ensureRankData(runtime);
-  assert.equal(rankProgress(runtime).xp, 0);
+  ensurePracticeData(runtime);
+  assert.deepEqual(runtime.rank, input.rank);
   assert.equal(getDueCards(runtime, null, 1).length, 3);
-  const award = awardRankXP(runtime, runtime.sets[0].cards[0], true, 'cards', new Date(2026, 9, 8));
-  assert.equal(award.awarded, 10); assert.equal(runtime.rank.xp, 10);
+  const fresh = { sets: [] };
+  ensurePracticeData(fresh);
+  assert.equal(Object.hasOwn(fresh, 'rank'), false);
 });
 
 test('last study lookup normalizes legacy ID types and does not invent an absent preference', () => {

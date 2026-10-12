@@ -1,13 +1,6 @@
-const escapeText = (value) => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
+import { shuffle } from './study-order.js';
 
-function shuffle(items) {
-  const result = [...items];
-  for (let index = result.length - 1; index > 0; index--) {
-    const other = Math.floor(Math.random() * (index + 1));
-    [result[index], result[other]] = [result[other], result[index]];
-  }
-  return result;
-}
+const escapeText = (value) => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
 
 const textKey = (value) => String(value).normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase();
 

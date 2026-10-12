@@ -62,7 +62,7 @@ export function attachmentGarbage(before, after) {
   return collectUnreferencedAttachments(after, attachmentReferences(before));
 }
 
-/** Delete one set without rewriting another set or the historical XP ledger. */
+/** Delete one set without rewriting another set or optional saved fields. */
 export function deleteSet(data, setId) {
   const { set, index } = existingSet(data, setId);
   const remainingSets = data.sets.filter((_, currentIndex) => currentIndex !== index);
@@ -84,7 +84,7 @@ export function deleteSet(data, setId) {
   };
 }
 
-/** Restart one set's scheduling/accuracy, preserving global activity and XP. */
+/** Restart one set's scheduling/accuracy, preserving global activity. */
 export function resetSetProgress(data, setId) {
   const { set } = existingSet(data, setId), ids = cardIdentities(set);
   return { ...data, reviews: withoutKeys(data.reviews, ids), cardStats: withoutKeys(data.cardStats, ids) };
@@ -96,8 +96,6 @@ export function resetAllProgress(data) {
   return {
     ...data,
     answers: 0, learned: 0, days: [], daily: {}, reviews: {}, cardStats: {},
-    // Keep an explicit rank object so ensureRankData cannot remigrate old XP.
-    rank: { ...(object(data.rank) ? data.rank : {}), version: 1, xp: 0, daily: {} },
   };
 }
 
