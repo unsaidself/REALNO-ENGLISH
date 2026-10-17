@@ -144,7 +144,7 @@ function visual(set) {
 }
 function goPage(next) { cleanupSession(); session = null; page = next; render(); }
 function findSet(id) { return data.sets.find(set => String(set.id) === String(id)); }
-function lastStudySet() { return findSet(data.lastStudySetId) || data.sets.find(set => set.cards.length) || data.sets[0]; }
+function lastStudySet() { const saved = findSet(data.lastStudySetId); return saved?.cards.length ? saved : data.sets.find(set => set.cards.length); }
 function rememberStudy(set, card = null) {
   const realSet = set.id === null && card ? data.sets.find(item => item.cards.some(entry => entry[2].id === card[2].id)) : findSet(set.id);
   if (realSet && data.lastStudySetId !== realSet.id) { data.lastStudySetId = realSet.id; save(); }
@@ -153,7 +153,12 @@ function getDueCards(value, setId = null) {
   const entries = scheduledDueCards(value, setId), eligible = new Set(limitedNewCards(value, entries.map(entry => entry.card)).map(card => card[2].id));
   return entries.filter(entry => eligible.has(entry.card[2].id));
 }
-function resumeStudy() { if (getDueCards(data).length) startReview(); else { const set = lastStudySet(); set ? openSet(set.id) : editor(); } }
+function resumeStudy() {
+  const set = lastStudySet();
+  if (!set) { editor(); return; }
+  if (getDueCards(data, set.id).length) startReview(set.id);
+  else openSet(set.id);
+}
 function render() {
   cleanupSession(); session = null;
   document.body.classList.remove('has-modal');
@@ -165,7 +170,7 @@ function render() {
   document.querySelector('#app').innerHTML = `
     <aside><a class="logo" href="#" aria-label="zhekandus, главная">zhekandus</a><div class="workspace">Твоё обучение</div>
       <nav>${[['home', 'Главная', 'home'], ['sets', 'Мои наборы', 'layers'], ['stats', 'Прогресс', 'chart'], ['storage', 'Копии и импорт', 'archive'], ['settings', 'Настройки', 'settings']].map(([p, label, glyph]) => `<button class="nav ${page === p ? 'active' : ''}" data-page="${p}" aria-label="${label}" title="${label}" ${page === p ? 'aria-current="page"' : ''}>${icon(glyph)}<span class="nav-label">${label}</span><span class="nav-label-mobile" aria-hidden="true">${({home:'Домой',sets:'Наборы',stats:'Рост',storage:'Копии',settings:'Опции'})[p]}</span>${p === 'sets' ? `<small>${data.sets.length}</small>` : ''}</button>`).join('')}</nav>
-      <div class="side-note"><b>Свой ритм, своя цель</b><p>${countLabel(data.settings.goal, ['ответ', 'ответа', 'ответов'])} в день. Сложные карточки вернутся раньше, знакомые — позже.</p><button class="text-button" id="sidebar-review">Повторить сегодня ${icon('arrow')}</button></div>
+      <div class="side-note"><b>Свой ритм, своя цель</b><p>${countLabel(data.settings.goal, ['ответ', 'ответа', 'ответов'])} в день. Сложные карточки вернутся раньше, знакомые — позже.</p><button class="text-button" id="sidebar-review">Продолжить последний набор ${icon('arrow')}</button></div>
       <div class="profile"><div class="avatar">${esc(avatar)}</div><div><b>${esc(username)}</b><small>Моя коллекция</small></div></div></aside>
     <main><header><div class="breadcrumb">zhekandus <span>/</span> ${page === 'home' ? 'Главная' : titles[page]}</div><div class="header-right"><button class="icon-button quick-add" id="quick-add" aria-label="Быстро добавить карточку" title="Добавить карточку">${icon('plus')}</button><button class="icon-button" id="settings" aria-label="Открыть настройки" title="Тема и настройки">${icon('settings')}</button><div class="avatar small" title="${esc(username)}">${esc(avatar)}</div></div></header>
       <div class="content"><div class="welcome"><div><h1>${title}</h1><p>${descriptions[page]}</p></div>${['home', 'sets'].includes(page) ? `<button class="primary" id="create">${icon('plus')} Создать набор</button>` : ''}</div><section id="storage-state" class="storage-state" role="alert" hidden><p></p><button class="secondary" id="retry-storage">Повторить сохранение</button><button class="text-button" id="storage-backup">Сделать резервную копию</button></section>
@@ -175,7 +180,7 @@ function render() {
   updateStorageStatus(); updateAutoBackupUI();
 }
 function hero() {
-  const set = lastStudySet(), due = getDueCards(data);
+  const set = lastStudySet(), due = set ? getDueCards(data, set.id) : [];
   if (!set) return `<section class="continue-panel empty-collection"><span class="panel-label">Твоя коллекция</span><h2>Начни с первого набора</h2><p>Добавь слова, выражения или факты, которые хочешь запомнить.</p><div class="study-actions"><button class="secondary" id="empty-import">${icon('import')} Импорт</button></div></section>`;
   return `<section class="continue-panel"><div><span class="panel-label">Продолжить</span><h2>${esc(set.title)}</h2><p>${countLabel(due.length, ['карточка', 'карточки', 'карточек'])} на сегодня · ${countLabel(set.cards.length, ['карточка', 'карточки', 'карточек'])} в последнем наборе</p></div><button class="primary" id="quick">${due.length ? 'Повторить сегодня' : 'Продолжить'} ${icon('arrow')}</button></section>`;
 }
@@ -185,8 +190,8 @@ function backupReminder() {
   return `<section class="backup-reminder" id="backup-reminder" role="note"><div>${icon('archive')}<b>Пора сделать резервную копию</b><p>${data.lastBackupAt ? 'С последней копии прошло больше недели.' : 'Сохрани наборы, прогресс и вложения отдельным файлом.'}</p></div><button class="secondary" id="backup-reminder-open">Сделать копию ${icon('arrow')}</button></section>`;
 }
 function dashboard() {
-  const due = getDueCards(data), daily = dailyProgress(data);
-  return `<div class="dashboard-row"><section class="review-panel"><span class="panel-label">${icon('rotate')} Интервальное повторение</span><h2>${due.length ? `${due.length} ${word(due.length, ['карточка', 'карточки', 'карточек'])} на сегодня` : 'Всё повторено'}</h2><p>${due.length ? 'Новые и забытые карточки — первыми. Следующий повтор зависит от твоего ответа.' : 'Следующие карточки появятся, когда подойдёт время повторения.'}</p><button class="primary" id="start-review" ${!due.length ? 'disabled' : ''}>Повторить ${icon('arrow')}</button></section><section class="goal-panel"><div><span class="panel-label">${icon('target')} Ежедневная цель</span><h2>${daily.complete ? 'Цель выполнена!' : 'Немного каждый день'}</h2><p>${daily.answers} из ${countLabel(daily.goal, ['ответ', 'ответа', 'ответов'])} сегодня</p><button class="text-button" id="change-goal">Изменить цель</button></div><div class="goal-ring" style="--progress:${Math.min(daily.percent, 100)}%"><span><b>${Math.round(daily.percent)}%</b><small>сегодня</small></span></div></section></div>`;
+  const set = lastStudySet(), due = set ? getDueCards(data, set.id) : [], daily = dailyProgress(data);
+  return `<div class="dashboard-row"><section class="review-panel"><span class="panel-label">${icon('rotate')} Интервальное повторение</span><h2>${due.length ? `${due.length} ${word(due.length, ['карточка', 'карточки', 'карточек'])} на сегодня` : 'Всё повторено'}</h2><p>${set ? `Набор «${esc(set.title)}». ${due.length ? 'Следующий повтор зависит от твоего ответа.' : 'На сегодня всё повторено. Можно выбрать другой режим этого набора.'}` : 'Создай набор, чтобы начать заниматься.'}</p><button class="primary" id="start-review" ${!set ? 'disabled' : ''}>${due.length ? 'Повторить' : 'Выбрать режим'} ${icon('arrow')}</button></section><section class="goal-panel"><div><span class="panel-label">${icon('target')} Ежедневная цель</span><h2>${daily.complete ? 'Цель выполнена!' : 'Немного каждый день'}</h2><p>${daily.answers} из ${countLabel(daily.goal, ['ответ', 'ответа', 'ответов'])} сегодня</p><button class="text-button" id="change-goal">Изменить цель</button></div><div class="goal-ring" style="--progress:${Math.min(daily.percent, 100)}%"><span><b>${Math.round(daily.percent)}%</b><small>сегодня</small></span></div></section></div>`;
 }
 function statsCards() {
   const streak = studyStreak(data), learnedCards = learnedCardCount(data);
@@ -227,8 +232,8 @@ function bind() {
   document.querySelector('#create')?.addEventListener('click', () => editor());
   document.querySelector('#quick')?.addEventListener('click', resumeStudy);
   document.querySelector('#empty-import')?.addEventListener('click', () => goPage('storage'));
-  document.querySelector('#start-review')?.addEventListener('click', () => startReview());
-  document.querySelector('#sidebar-review').onclick = () => startReview();
+  document.querySelector('#start-review')?.addEventListener('click', resumeStudy);
+  document.querySelector('#sidebar-review').onclick = resumeStudy;
   document.querySelector('#change-goal')?.addEventListener('click', () => { goPage('settings'); document.querySelector('#daily-goal').focus(); });
   document.querySelector('#calendar-prev')?.addEventListener('click', () => { calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() - 1, 1); render(); });
   document.querySelector('#calendar-next')?.addEventListener('click', () => { calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 1); render(); });
@@ -503,6 +508,7 @@ function cardPagination(pageIndex, total, name) {
 }
 function openSet(id, termsPage = 0) {
   session = null; const set = findSet(id); if (!set) return;
+  if (set.cards.length) rememberStudy(set);
   const index = answerIndex(set, direction);
   const canTest = canTestSet(index);
   termsPage = Math.max(0, Math.min(termsPage, Math.ceil(set.cards.length / 40) - 1));
@@ -529,10 +535,11 @@ function beginStudy(set, mode, queue) {
   session = { set, mode, direction: mode === 'cloze' ? 'normal' : direction, index: 0, correct: 0, streak: 0, flipped: false, answered: false, results: [], options: null, queue };
   study();
 }
-function startReview(setId = null) {
-  const entries = scheduledDueCards(data, setId);
-  if (!entries.length) { notify('На сегодня всё повторено. Можно потренироваться в любом наборе.'); return; }
-  const set = setId === null ? { id: null, title: 'Повторение на сегодня', cards: entries.map(e => e.card) } : findSet(setId);
+function startReview(setId = lastStudySet()?.id) {
+  const set = findSet(setId);
+  if (!set) { notify('Набор не найден. Выбери другой набор.'); return; }
+  const entries = scheduledDueCards(data, set.id);
+  if (!entries.length) { notify('В этом наборе на сегодня всё повторено. Можно выбрать другой режим.'); return; }
   beginStudy(set, 'review', entries.map(e => e.card));
 }
 function startMatching(set) {
@@ -681,7 +688,7 @@ function record(ok, card, grade = ok, now = Date.now()) {
 function finish() {
   const s = session; if (!s) return;
   modal(`<div class="result-icon">${icon('trophy')}</div><div class="eyebrow">Занятие завершено</div><h2>${s.correct === s.queue.length ? 'Все ответы правильные!' : 'Практика завершена'}</h2><p>${s.mode === 'review' ? 'Расписание следующих повторов обновлено.' : 'Карточки получили своё время следующего повторения.'}</p><div class="result-score">${s.correct}<span> / ${s.queue.length}</span></div><p>правильных ответов</p><div class="terms">${s.results.filter(r => !r.ok).map(r => `<div><b>${esc(r.term)}</b><span>${esc(r.expected)}</span></div>`).join('')}</div><div class="study-actions"><button class="primary" id="repeat">${icon('rotate')} Повторить</button><button class="secondary" id="done">На главную ${icon('arrow')}</button></div>`);
-  document.querySelector('#repeat').onclick = () => { session = null; s.set.id === null ? startReview() : openSet(s.set.id); };
+  document.querySelector('#repeat').onclick = () => { session = null; findSet(s.set.id) ? openSet(s.set.id) : resumeStudy(); };
   document.querySelector('#done').onclick = () => goPage('home');
 }
 function mediaManager(set, mediaPage = 0) {
